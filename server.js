@@ -217,6 +217,9 @@ const TRACKED_PAGES = {
 function trackPageView(req, res, file) {
   const label = TRACKED_PAGES[file];
   if (!label) return; // only HTML pages count, not assets (style.css, app.js, …)
+  // Health-check probe: the monitor fetches /?health=1 — never count it,
+  // or every 15-minute check would look like a new visitor.
+  if (new URL(req.url, 'http://x').searchParams.get('health') === '1') return;
   const cookies = parseCookies(req);
   let vid = cookies.visitor_id;
   if (!vid || !/^[0-9a-f]{32}$/.test(vid)) {
