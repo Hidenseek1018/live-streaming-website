@@ -16,22 +16,22 @@
 <h3 style="margin-top:16px">List your own product</h3>
 <input id="pName" placeholder="Product name"><input id="pPrice" type="number" min="0.01" step="0.01" placeholder="Price ($)">
 <input id="pStock" type="number" min="0" step="1" placeholder="Stock"><button class="small" onclick="addProduct()">List product</button>
-<label class="ack"><input type="checkbox" id="ackSeller"> I agree to the <a href="/sales-policy.html" target="_blank">Seller &amp; Sales Policy</a> — no real money is charged through this site yet.</label></div>
+<label class="ack" id="sellerAckLabel"><input type="checkbox" id="ackSeller"> I agree to the <a href="/sales-policy.html" target="_blank">Seller &amp; Sales Policy</a> — no real money is charged through this site yet.</label></div>
 </div>
 
 <div id="checkoutModal" class="modal" style="display:none"><div class="box">
 <h3>Checkout</h3><p id="checkoutItem"></p>
 <label>Your name</label><input id="buyerName" placeholder="Your name (optional)">
-<label>Payment method</label><div id="payChoices"></div>
-<p class="note">No real charging — this only records which payment method you chose. Saved methods are managed in the Dashboard.</p>
-<label class="ack"><input type="checkbox" id="ackTerms"> I understand this is not a real payment — my order is only recorded, no money is charged — and I agree to the <a href="/terms.html" target="_blank">Terms of Service</a> and <a href="/sales-policy.html" target="_blank">Seller &amp; Sales Policy</a>.</label>
+<label>Payment method</label><div id="payChoicesWrap"><div id="payChoices"></div></div>
+<p class="note" id="checkoutNote">No real charging — this only records which payment method you chose. Saved methods are managed in the Dashboard.</p>
+<label class="ack" id="termsAckLabel"><input type="checkbox" id="ackTerms"> I understand this is not a real payment — my order is only recorded, no money is charged — and I agree to the <a href="/terms.html" target="_blank">Terms of Service</a> and <a href="/sales-policy.html" target="_blank">Seller &amp; Sales Policy</a>.</label>
 <div class="row"><button id="confirmBuy">Buy now</button><button class="secondary" onclick="closeCheckout()">Cancel</button></div>
 <p id="buyMsg"></p>
 </div></div>
 </main>
 <footer>
 <p><a href="/terms.html">Terms of Service</a> · <a href="/privacy.html">Privacy Policy</a> · <a href="/sales-policy.html">Seller &amp; Sales Policy</a></p>
-<p>18+ only · No real payments yet — orders record the payment method chosen, no money is charged.</p>
+<p id="footerPayNote">18+ only · No real payments yet — orders record the payment method chosen, no money is charged.</p>
 </footer>
 <script src="/app.js"></script>
 <script>
@@ -39,10 +39,19 @@ const params = new URLSearchParams(location.search);
 const streamId = Number(params.get('id'));
 const myId = viewerId();
 let stream = null, pc = null, signalSince = 0, joinedAt = Date.now(), gotVideo = false, pollTimer, chatTimer, hbTimer;
-let selectedProduct = null, selectedMethod = null;
+let selectedProduct = null, selectedMethod = null, stripeEnabled = false;
 
 async function init() {
   if (!streamId) { $('#room').innerHTML = '<p>No stream selected. <a href="/">Back to Discover</a></p>'; return; }
+  // Is card checkout (Stripe) switched on? If so, the room's payment copy
+  // changes from record-only to secure Stripe checkout.
+  try { stripeEnabled = !!(await api('/api/checkout/config')).stripe_enabled; } catch (e) { stripeEnabled = false; }
+  if (stripeEnabled) {
+    const sa = $('#sellerAckLabel');
+    if (sa) sa.innerHTML = `<input type="checkbox" id="ackSeller"> I agree to the <a href="/sales-policy.html" target="_blank">Seller &amp; Sales Policy</a> — payments are processed securely by Stripe.`;
+    const fp = $('#footerPayNote');
+    if (fp) fp.textContent = '18+ only · Secure card payments by Stripe.';
+  }
   stream = await api('/api/streams/' + streamId);
   const followed = (await api('/api/follows')).some(f => f.channel === stream.channel_name);
   $('#room').innerHTML = `<h1>${esc(stream.title)}</h1>
@@ -146,19 +155,48 @@ async function openCheckout(productId) {
   $('#checkoutItem').textContent = `${selectedProduct.name} — $${Number(selectedProduct.price).toFixed(2)}`;
   $('#buyMsg').textContent = '';
   $('#ackTerms').checked = false;
-  const saved = await api('/api/payment-methods');
-  const def = saved.find(m => m.is_default) || saved[0];
-  selectedMethod = def ? `${def.label} (${def.kind}${def.last4_or_handle ? ' •• ' + def.last4_or_handle : ''})` : ONE_TIME_METHODS[0];
-  $('#payChoices').innerHTML =
-    saved.map(m => `<label style="display:block;margin:4px 0"><input type="radio" name="pay" style="width:auto" value="${esc(m.label)} (${esc(m.kind)}${m.last4_or_handle ? ' •• ' + esc(m.last4_or_handle) : ''})" ${m === def ? 'checked' : ''}> ${esc(m.label)} — ${esc(m.kind)}${m.last4_or_handle ? ' •• ' + esc(m.last4_or_handle) : ''}${m.is_default ? ' (default)' : ''}</label>`).join('') +
-    ONE_TIME_METHODS.map(m => `<label style="display:block;margin:4px 0"><input type="radio" name="pay" style="width:auto" value="${m}" ${!def && m === ONE_TIME_METHODS[0] ? 'checked' : ''}> ${m} (one-time)</label>`).join('');
-  document.querySelectorAll('input[name=pay]').forEach(r => r.addEventListener('change', () => selectedMethod = r.value));
+  const wrap = $('#payChoicesWrap');
+  if (stripeEnabled) {
+    // Card payment goes through Stripe's hosted checkout — no payment
+    // method is picked here, Stripe collects it on its own page.
+    if (wrap) wrap.style.display = 'none';
+    const note = $('#checkoutNote');
+    if (note) note.textContent = 'Secure checkout with Stripe — you will be redirected to Stripe to pay by card. No payment details are stored on this site.';
+    const ack = $('#termsAckLabel');
+    if (ack) ack.innerHTML = `<input type="checkbox" id="ackTerms"> I agree to the <a href="/terms.html" target="_blank">Terms of Service</a> and <a href="/sales-policy.html" target="_blank">Seller &amp; Sales Policy</a>.`;
+    $('#confirmBuy').textContent = 'Continue to secure payment';
+  } else {
+    if (wrap) wrap.style.display = '';
+    const note = $('#checkoutNote');
+    if (note) note.textContent = 'No real charging — this only records which payment method you chose. Saved methods are managed in the Dashboard.';
+    $('#confirmBuy').textContent = 'Buy now';
+    const saved = await api('/api/payment-methods');
+    const def = saved.find(m => m.is_default) || saved[0];
+    selectedMethod = def ? `${def.label} (${def.kind}${def.last4_or_handle ? ' •• ' + def.last4_or_handle : ''})` : ONE_TIME_METHODS[0];
+    $('#payChoices').innerHTML =
+      saved.map(m => `<label style="display:block;margin:4px 0"><input type="radio" name="pay" style="width:auto" value="${esc(m.label)} (${esc(m.kind)}${m.last4_or_handle ? ' •• ' + esc(m.last4_or_handle) : ''})" ${m === def ? 'checked' : ''}> ${esc(m.label)} — ${esc(m.kind)}${m.last4_or_handle ? ' •• ' + esc(m.last4_or_handle) : ''}${m.is_default ? ' (default)' : ''}</label>`).join('') +
+      ONE_TIME_METHODS.map(m => `<label style="display:block;margin:4px 0"><input type="radio" name="pay" style="width:auto" value="${m}" ${!def && m === ONE_TIME_METHODS[0] ? 'checked' : ''}> ${m} (one-time)</label>`).join('');
+    document.querySelectorAll('input[name=pay]').forEach(r => r.addEventListener('change', () => selectedMethod = r.value));
+  }
   $('#checkoutModal').style.display = 'flex';
 }
 function closeCheckout() { $('#checkoutModal').style.display = 'none'; }
 $('#confirmBuy').onclick = async () => {
   if (!$('#ackTerms').checked) { $('#buyMsg').textContent = 'Please tick the acknowledgment box first.'; return; }
   const buyer = $('#buyerName').value.trim() || displayName();
+  if (stripeEnabled) {
+    try {
+      const c = await api('/api/checkout', { method: 'POST', body: JSON.stringify({ product_id: selectedProduct.id, stream_id: streamId, buyer }) });
+      if (c && c.url) { location.href = c.url; return; }
+      throw new Error('Secure checkout did not return a payment page.');
+    } catch (e) {
+      if (e.message && e.message.includes('not set up')) {
+        // Stripe was on when the page loaded but is off now — fall through
+        // to the record-only flow below instead of failing the purchase.
+        stripeEnabled = false;
+      } else { $('#buyMsg').textContent = 'Could not start secure checkout: ' + e.message; toast(e.message || 'Checkout failed', 'err'); return; }
+    }
+  }
   try {
     const order = await api('/api/orders', { method: 'POST', body: JSON.stringify({ product_id: selectedProduct.id, stream_id: streamId, buyer, payment_method: selectedMethod }) });
     $('#buyMsg').innerHTML = `<span class="ok">Order #${order.id} recorded — paid with ${esc(order.payment_method)}. ${order.remaining_stock} left in stock. No real charge was made.</span>`;

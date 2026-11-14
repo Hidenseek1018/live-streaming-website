@@ -1,6 +1,9 @@
 // Live-streaming platform — zero-dependency Node server.
-// Built-ins only: node:http + node:sqlite (Node >= 22.5). No real payments.
+// Built-ins only: node:http + node:sqlite (Node >= 22.5). Card payments via
+// Stripe Checkout when STRIPE_SECRET_KEY is set; without it, orders are
+// record-only (no charge).
 const http = require('node:http');
+const https = require('node:https');
 const fs = require('node:fs');
 const path = require('node:path');
 const crypto = require('node:crypto');
@@ -12,6 +15,13 @@ const DATA_DIR = process.env.DATA_DIR || path.join(__dirname, 'data');
 // Admin passcode. If unset, the whole admin API refuses access (503) —
 // there is intentionally no default passcode.
 const ADMIN_CODE = process.env.ADMIN_CODE || '';
+// Stripe secret key (test key first; live key later). When unset, checkout
+// behaves exactly as before — record-only orders, no charge.
+const STRIPE_SECRET_KEY = process.env.STRIPE_SECRET_KEY || '';
+// Test-only override for the Stripe API base (lets a local stub stand in for
+// api.stripe.com during verification). Never set in production.
+const STRIPE_API_BASE = process.env.STRIPE_API_BASE || 'https://api.stripe.com';
+const stripeEnabled = () => !!STRIPE_SECRET_KEY;
 fs.mkdirSync(DATA_DIR, { recursive: true });
 const db = new DatabaseSync(path.join(DATA_DIR, 'app.db'));
 db.exec('PRAGMA journal_mode = WAL; PRAGMA foreign_keys = ON;');
@@ -120,6 +130,19 @@ try {
   }
 } catch { /* column already present */ }
 
+// Migration: orders.stripe_session_id + orders.payment_status (Stripe Checkout)
+// payment_status is 'paid' or 'unpaid' for Stripe orders; NULL for older
+// record-only orders.
+try {
+  const cols = db.prepare('PRAGMA table_info(orders)').all();
+  if (!cols.some((c) => c.name === 'stripe_session_id')) {
+    db.exec('ALTER TABLE orders ADD COLUMN stripe_session_id TEXT DEFAULT NULL');
+  }
+  if (!cols.some((c) => c.name === 'payment_status')) {
+    db.exec('ALTER TABLE orders ADD COLUMN payment_status TEXT DEFAULT NULL');
+  }
+} catch { /* columns already present */ }
+
 const now = () => Date.now();
 const STALE_MS = 90_000; // signals older than this are ignored
 const VIEWER_TTL_MS = 30_000;
@@ -202,6 +225,46 @@ function requireAge(req, res) {
   if (ageVerified(req)) return true;
   sendJson(res, 403, { error: 'Age verification required — you must be 18 or older to use this feature.', code: 'age_required' });
   return false;
+}
+
+// ---- Stripe Checkout ----
+// Card payments via Stripe's hosted Checkout. No SDK — raw HTTPS calls to
+// api.stripe.com with the secret key from the environment only. The key is
+// never logged. If STRIPE_SECRET_KEY is unset, the checkout endpoints report
+// that card payments are not set up and the old record-only flow is used.
+// No webhook in v1: payment is confirmed by retrieving the Checkout Session
+// from Stripe after the buyer returns (see /api/checkout/confirm).
+function stripeRequest(method, path, params) {
+  return new Promise((resolve, reject) => {
+    const base = new URL(STRIPE_API_BASE);
+    const body = params ? new URLSearchParams(params).toString() : '';
+    const lib = base.protocol === 'http:' ? http : https; // http: is test-stub only
+    const req = lib.request({
+      hostname: base.hostname,
+      port: base.port || (base.protocol === 'http:' ? 80 : 443),
+      path,
+      method,
+      headers: {
+        Authorization: 'Basic ' + Buffer.from(STRIPE_SECRET_KEY + ':').toString('base64'),
+        'Content-Type': 'application/x-www-form-urlencoded',
+        'Content-Length': Buffer.byteLength(body),
+      },
+      timeout: 15000,
+    }, (res) => {
+      let data = '';
+      res.on('data', (c) => { data += c; });
+      res.on('end', () => {
+        let parsed = {};
+        try { parsed = JSON.parse(data); } catch { /* non-JSON error body */ }
+        if (res.statusCode >= 200 && res.statusCode < 300) return resolve(parsed);
+        reject(new Error((parsed.error && parsed.error.message) || ('Stripe error ' + res.statusCode)));
+      });
+    });
+    req.on('timeout', () => req.destroy(new Error('Stripe request timed out')));
+    req.on('error', reject);
+    if (body) req.write(body);
+    req.end();
+  });
 }
 
 // ---- Visitor analytics (first-party only) ----
@@ -529,6 +592,74 @@ const server = http.createServer(async (req, res) => {
         db.exec('COMMIT');
       } catch (e) { db.exec('ROLLBACK'); throw e; }
       return sendJson(res, 201, { ...order, product_name: product.name, remaining_stock: product.stock - 1 });
+    }
+
+    // Stripe Checkout: config + create session + confirm payment.
+    // The order is created unpaid when the Checkout Session is made, and
+    // only marked paid after the session is retrieved from Stripe and
+    // reports payment_status 'paid'. URL params are never trusted alone.
+    if (p === '/api/checkout/config' && req.method === 'GET') {
+      return sendJson(res, 200, { stripe_enabled: stripeEnabled() });
+    }
+    if (p === '/api/checkout' && req.method === 'POST') {
+      if (!requireAge(req, res)) return;
+      const b = await readBody(req);
+      const product = db.prepare('SELECT * FROM products WHERE id=?').get(b.product_id);
+      if (!product) return sendJson(res, 404, { error: 'product not found' });
+      if (product.stock <= 0) return sendJson(res, 400, { error: 'out of stock' });
+      if (!stripeEnabled()) return sendJson(res, 503, { error: 'Card payments are not set up yet.', stripe_enabled: false });
+      const streamId = b.stream_id ? Number(b.stream_id) : product.stream_id;
+      const proto = req.headers['x-forwarded-proto'] || 'http';
+      const host = req.headers.host || `localhost:${PORT}`;
+      const base = `${proto}://${host}`;
+      const returnBase = streamId ? `/room.html?id=${streamId}` : '/dashboard.html';
+      const sep = streamId ? '&' : '?';
+      let session;
+      try {
+        session = await stripeRequest('POST', '/v1/checkout/sessions', {
+          mode: 'payment',
+          'line_items[0][price_data][currency]': 'usd',
+          'line_items[0][price_data][product_data][name]': product.name,
+          'line_items[0][price_data][unit_amount]': String(Math.round(Number(product.price) * 100)),
+          'line_items[0][quantity]': '1',
+          success_url: `${base}${returnBase}${sep}checkout=success&session_id={CHECKOUT_SESSION_ID}`,
+          cancel_url: `${base}${returnBase}${sep}checkout=cancelled`,
+        });
+      } catch (e) {
+        return sendJson(res, 502, { error: 'Could not start secure checkout: ' + e.message });
+      }
+      if (!session || !session.id || !session.url) return sendJson(res, 502, { error: 'Could not start secure checkout.' });
+      db.exec('BEGIN IMMEDIATE');
+      let order;
+      try {
+        const upd = db.prepare('UPDATE products SET stock = stock - 1 WHERE id=? AND stock > 0').run(product.id);
+        if (upd.changes === 0) { db.exec('ROLLBACK'); return sendJson(res, 400, { error: 'out of stock' }); }
+        const r = db.prepare('INSERT INTO orders (product_id, stream_id, buyer, payment_method, amount, stripe_session_id, payment_status, created_at) VALUES (?,?,?,?,?,?,?,?)')
+          .run(product.id, streamId || null, esc(b.buyer) || 'Anonymous', 'Stripe', product.price, session.id, 'unpaid', now());
+        order = db.prepare('SELECT * FROM orders WHERE id=?').get(r.lastInsertRowid);
+        db.exec('COMMIT');
+      } catch (e) { db.exec('ROLLBACK'); throw e; }
+      return sendJson(res, 201, { url: session.url, session_id: session.id, order_id: order.id });
+    }
+    if (p === '/api/checkout/confirm' && req.method === 'GET') {
+      if (!requireAge(req, res)) return;
+      const sessionId = u.searchParams.get('session_id') || '';
+      if (!sessionId) return sendJson(res, 400, { error: 'session_id is required' });
+      if (!stripeEnabled()) return sendJson(res, 503, { error: 'Card payments are not set up yet.', stripe_enabled: false });
+      const order = db.prepare('SELECT * FROM orders WHERE stripe_session_id=?').get(sessionId);
+      if (!order) return sendJson(res, 404, { error: 'order not found for this checkout session' });
+      let session;
+      try {
+        session = await stripeRequest('GET', '/v1/checkout/sessions/' + encodeURIComponent(sessionId));
+      } catch (e) {
+        return sendJson(res, 502, { error: 'Could not verify payment with Stripe: ' + e.message });
+      }
+      const paid = session && session.payment_status === 'paid';
+      if (paid && order.payment_status !== 'paid') {
+        db.prepare("UPDATE orders SET payment_status='paid' WHERE id=?").run(order.id);
+      }
+      const updated = db.prepare('SELECT * FROM orders WHERE id=?').get(order.id);
+      return sendJson(res, 200, { paid, payment_status: session.payment_status || 'unknown', order: updated });
     }
 
     // Payment methods (store label + last-4/handle only — never full numbers)
