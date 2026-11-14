@@ -5,38 +5,44 @@
 </nav></header>
 <main>
 <h1>Dashboard</h1>
-<div class="stat-grid" id="stats"></div>
+<div class="stat-grid" id="stats"><p class="note">Loading…</p></div>
 
 <div class="card"><h2>Visitor analytics</h2>
 <p class="note">Simple first-party counts — every page load is one view, unique visitors are counted by a random cookie (no IP addresses stored, no third-party service).</p>
-<div id="analytics"></div></div>
+<div id="analytics"><p class="note">Loading…</p></div></div>
 
 <div class="card"><h2>Payment options</h2>
 <p class="note">Save nicknamed payment methods for checkout. Only the label and last 4 digits / handle are stored — never full card numbers. The default is pre-selected at checkout. No real charging happens anywhere in this app.</p>
-<div id="methods"></div>
+<div id="methods"><p class="note">Loading…</p></div>
 <div class="row">
-<input id="mLabel" placeholder="Nickname (e.g. My Visa)" style="flex:2">
-<select id="mKind" style="flex:1"><option>Card</option><option>PayPal</option><option>Apple Pay</option><option>Google Pay</option><option>Cash App</option><option>Bank transfer</option></select>
-<input id="mLast4" placeholder="Last 4 / handle (optional)" style="flex:1">
+<input id="mLabel" placeholder="Nickname (e.g. My Visa)" style="flex:2;min-width:180px">
+<select id="mKind" style="flex:1;min-width:140px"><option>Card</option><option>PayPal</option><option>Apple Pay</option><option>Google Pay</option><option>Cash App</option><option>Bank transfer</option></select>
+<input id="mLast4" placeholder="Last 4 / handle (optional)" style="flex:1;min-width:140px">
 <button class="small" onclick="saveMethod()">Save method</button>
 </div><p id="mMsg"></p></div>
 
 <div class="card"><h2>List a product</h2>
-<div class="row"><input id="pName" placeholder="Product name" style="flex:2">
-<input id="pPrice" type="number" min="0.01" step="0.01" placeholder="Price ($)" style="flex:1">
-<input id="pStock" type="number" min="0" step="1" placeholder="Stock" style="flex:1">
+<div class="row"><input id="pName" placeholder="Product name" style="flex:2;min-width:180px">
+<input id="pPrice" type="number" min="0.01" step="0.01" placeholder="Price ($)" style="flex:1;min-width:110px">
+<input id="pStock" type="number" min="0" step="1" placeholder="Stock" style="flex:1;min-width:110px">
 <button class="small" onclick="addProduct()">List product</button></div>
-<div id="productList"></div></div>
+<label class="ack"><input type="checkbox" id="ackSeller"> I agree to the <a href="/sales-policy.html" target="_blank">Seller &amp; Sales Policy</a> — no real money is charged through this site yet.</label>
+<div id="productList"><p class="note">Loading…</p></div></div>
 
-<div class="card"><h2>Orders received</h2><div id="orders"></div></div>
-<div class="card"><h2>Stream history</h2><div id="history"></div></div>
-<div class="card"><h2>Channels you follow</h2><div id="follows"></div></div>
+<div class="card"><h2>Orders received</h2><div id="orders"><p class="note">Loading…</p></div></div>
+<div class="card"><h2>Stream history</h2><div id="history"><p class="note">Loading…</p></div></div>
+<div class="card"><h2>Channels you follow</h2><div id="follows"><p class="note">Loading…</p></div></div>
 <div class="card"><h2>Site admin</h2>
-<p class="note">Moderate streams, chat, products, orders and channels. Passcode protected — set <code>ADMIN_CODE</code> on the server first.</p>
+<p class="note">Moderate streams, chat, products, orders and channels — passcode required.</p>
 <p><a href="/admin.html">Open admin panel →</a></p></div>
 </main>
+<footer>
+<p><a href="/terms.html">Terms of Service</a> · <a href="/privacy.html">Privacy Policy</a> · <a href="/sales-policy.html">Seller &amp; Sales Policy</a></p>
+<p>18+ only · No real payments yet — orders record the payment method chosen, no money is charged.</p>
+</footer>
 <script src="/app.js"></script>
 <script>
+const PAGE_LABELS = { home: 'Home', studio: 'Studio', room: 'Room', dashboard: 'Dashboard', admin: 'Admin' };
 async function load() {
   const s = await api('/api/stats');
   $('#stats').innerHTML = [
@@ -48,17 +54,17 @@ async function load() {
 
   const a = await api('/api/analytics');
   $('#analytics').innerHTML =
-    `<h3>Views per page</h3>` + (a.per_page.length ? `<table><tr><th>Page</th><th>Views</th></tr>${a.per_page.map(r => `<tr><td>${esc(r.path)}</td><td>${r.views}</td></tr>`).join('')}</table>` : '<p class="note">No visits yet.</p>') +
-    `<h3>Visits per day (last 30 days)</h3>` + (a.per_day.length ? `<table><tr><th>Day</th><th>Visits</th></tr>${a.per_day.map(r => `<tr><td>${esc(r.day)}</td><td>${r.views}</td></tr>`).join('')}</table>` : '<p class="note">No visits yet.</p>');
+    `<h3>Views per page</h3>` + (a.per_page.length ? `<div class="scroll-x"><table><tr><th>Page</th><th>Views</th></tr>${a.per_page.map(r => `<tr><td>${esc(PAGE_LABELS[r.path] || r.path)}</td><td>${r.views}</td></tr>`).join('')}</table></div>` : '<p class="note">No visits yet.</p>') +
+    `<h3>Visits per day (last 30 days)</h3>` + (a.per_day.length ? `<div class="scroll-x"><table><tr><th>Day</th><th>Visits</th></tr>${a.per_day.map(r => `<tr><td>${esc(r.day)}</td><td>${r.views}</td></tr>`).join('')}</table></div>` : '<p class="note">No visits yet.</p>');
 
   const methods = await api('/api/payment-methods');
   $('#methods').innerHTML = methods.length ? methods.map(m => `<p>${esc(m.label)} — ${esc(m.kind)}${m.last4_or_handle ? ' •• ' + esc(m.last4_or_handle) : ''} ${m.is_default ? '<b class="ok">(default)</b>' : `<button class="small secondary" onclick="setDefault(${m.id})">Set default</button>`} <button class="small secondary" onclick="delMethod(${m.id})">Remove</button></p>`).join('') : '<p class="note">No saved methods yet.</p>';
 
   const prods = await api('/api/products');
-  $('#productList').innerHTML = prods.length ? `<table><tr><th>Product</th><th>Price</th><th>Stock</th><th>Pinned stream</th></tr>${prods.map(p => `<tr><td>${esc(p.name)}</td><td>$${Number(p.price).toFixed(2)}</td><td>${p.stock}</td><td>${p.stream_id ? 'Stream #' + p.stream_id : '—'}</td></tr>`).join('')}</table>` : '<p class="note">No listings yet.</p>';
+  $('#productList').innerHTML = prods.length ? `<div class="scroll-x"><table><tr><th>Product</th><th>Price</th><th>Stock</th><th>Pinned stream</th></tr>${prods.map(p => `<tr><td>${esc(p.name)}</td><td>$${Number(p.price).toFixed(2)}</td><td>${p.stock}</td><td>${p.stream_id ? 'Stream #' + p.stream_id : '—'}</td></tr>`).join('')}</table></div>` : '<p class="note">No listings yet.</p>';
 
   const orders = await api('/api/orders');
-  $('#orders').innerHTML = orders.length ? `<table><tr><th>Order</th><th>Product</th><th>Buyer</th><th>Amount</th><th>Payment method</th><th>When</th></tr>${orders.map(o => `<tr><td>#${o.id}</td><td>${esc(o.product_name || '')}</td><td>${esc(o.buyer)}</td><td>$${Number(o.amount).toFixed(2)}</td><td>${esc(o.payment_method)}</td><td>${new Date(o.created_at).toLocaleString()}</td></tr>`).join('')}</table>` : '<p class="note">No orders yet.</p>';
+  $('#orders').innerHTML = orders.length ? `<div class="scroll-x"><table><tr><th>Order</th><th>Product</th><th>Buyer</th><th>Amount</th><th>Payment method</th><th>When</th></tr>${orders.map(o => `<tr><td>#${o.id}</td><td>${esc(o.product_name || '')}</td><td>${esc(o.buyer)}</td><td>$${Number(o.amount).toFixed(2)}</td><td>${esc(o.payment_method)}</td><td>${new Date(o.created_at).toLocaleString()}</td></tr>`).join('')}</table></div>` : '<p class="note">No orders yet.</p>';
 
   const streams = await api('/api/streams');
   $('#history').innerHTML = streams.length ? streams.map(s => `<p><span class="${s.status === 'live' ? 'live-badge' : 'ended-badge'}">${s.status.toUpperCase()}</span> <b>${esc(s.title)}</b> — ${esc(s.channel_name)} · ${esc(s.category)} · 👁 ${s.viewer_count} · ${new Date(s.created_at).toLocaleString()} ${s.status === 'live' ? `<a href="/room.html?id=${s.id}">Watch</a>` : ''}</p>`).join('') : '<p class="note">No streams yet.</p>';
@@ -78,6 +84,7 @@ async function unfollow(ch) { await fetch('/api/follows?channel=' + encodeURICom
 async function addProduct() {
   const name = $('#pName').value.trim(), price = parseFloat($('#pPrice').value), stock = parseInt($('#pStock').value || '0', 10);
   if (!name || !(price > 0)) { toast('Product name and a price above $0 are required', 'warn'); return; }
+  if (!$('#ackSeller').checked) { toast('Please tick the seller terms box first', 'warn'); return; }
   await api('/api/products', { method: 'POST', body: JSON.stringify({ name, price, stock }) });
   $('#pName').value = ''; $('#pPrice').value = ''; $('#pStock').value = ''; toast('Product listed', 'ok'); load();
 }

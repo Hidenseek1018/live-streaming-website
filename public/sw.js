@@ -5,7 +5,7 @@
 // live streams, chat, orders, visitor counts and the 18+ gate always see
 // fresh server state. WebRTC signalling also runs over /api/* and is never
 // intercepted by the cache.
-const CACHE_NAME = 'livestream-shell-v1';
+const CACHE_NAME = 'livestream-shell-v2';
 const SHELL = [
   '/',
  '/index.html',
@@ -13,6 +13,9 @@ const SHELL = [
   '/room.html',
   '/dashboard.html',
   '/admin.html',
+  '/terms.html',
+  '/privacy.html',
+  '/sales-policy.html',
   '/style.css',
   '/app.js',
   '/manifest.json',

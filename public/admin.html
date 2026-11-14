@@ -18,21 +18,26 @@
 <div id="panel" style="display:none">
 <div class="row"><button class="small" onclick="loadAll()">Refresh</button>
 <button class="small secondary" onclick="lock()">Lock</button></div>
-<div class="stat-grid" id="stats"></div>
+<div class="stat-grid" id="stats"><p class="note">Loading…</p></div>
 
 <div class="card"><h2>Visitor analytics</h2>
 <p class="note">First-party counts only — page views and unique visitors by random cookie, no IP addresses stored.</p>
-<div id="analytics"></div></div>
+<div id="analytics"><p class="note">Loading…</p></div></div>
 
-<div class="card"><h2>Live streams</h2><div id="live"></div></div>
-<div class="card"><h2>Recent chat (all streams)</h2><div id="chat"></div></div>
-<div class="card"><h2>Products</h2><div id="products"></div></div>
-<div class="card"><h2>Orders</h2><div id="orders"></div></div>
-<div class="card"><h2>Channels</h2><div id="channels"></div></div>
+<div class="card"><h2>Live streams</h2><div id="live"><p class="note">Loading…</p></div></div>
+<div class="card"><h2>Recent chat (all streams)</h2><div id="chat"><p class="note">Loading…</p></div></div>
+<div class="card"><h2>Products</h2><div id="products"><p class="note">Loading…</p></div></div>
+<div class="card"><h2>Orders</h2><div id="orders"><p class="note">Loading…</p></div></div>
+<div class="card"><h2>Channels</h2><div id="channels"><p class="note">Loading…</p></div></div>
 </div>
 </main>
+<footer>
+<p><a href="/terms.html">Terms of Service</a> · <a href="/privacy.html">Privacy Policy</a> · <a href="/sales-policy.html">Seller &amp; Sales Policy</a></p>
+<p>18+ only · No real payments yet — orders record the payment method chosen, no money is charged.</p>
+</footer>
 <script src="/app.js"></script>
 <script>
+const PAGE_LABELS = { home: 'Home', studio: 'Studio', room: 'Room', dashboard: 'Dashboard', admin: 'Admin' };
 let CODE = sessionStorage.getItem('admin_code') || '';
 function headers() { return { 'Content-Type': 'application/json', 'x-admin-code': CODE }; }
 async function aapi(path, opts) {
@@ -73,23 +78,23 @@ async function loadAll() {
     ].map(([k, v]) => `<div class="stat"><b>${v}</b><span>${k}</span></div>`).join('');
 
     $('#analytics').innerHTML =
-      `<h3>Views per page</h3>` + (s.per_page.length ? `<table><tr><th>Page</th><th>Views</th></tr>${s.per_page.map(r => `<tr><td>${esc(r.path)}</td><td>${r.views}</td></tr>`).join('')}</table>` : '<p class="note">No visits yet.</p>') +
-      `<h3>Visits per day (last 30 days)</h3>` + (s.per_day.length ? `<table><tr><th>Day</th><th>Visits</th></tr>${s.per_day.map(r => `<tr><td>${esc(r.day)}</td><td>${r.views}</td></tr>`).join('')}</table>` : '<p class="note">No visits yet.</p>');
+      `<h3>Views per page</h3>` + (s.per_page.length ? `<div class="scroll-x"><table><tr><th>Page</th><th>Views</th></tr>${s.per_page.map(r => `<tr><td>${esc(PAGE_LABELS[r.path] || r.path)}</td><td>${r.views}</td></tr>`).join('')}</table></div>` : '<p class="note">No visits yet.</p>') +
+      `<h3>Visits per day (last 30 days)</h3>` + (s.per_day.length ? `<div class="scroll-x"><table><tr><th>Day</th><th>Visits</th></tr>${s.per_day.map(r => `<tr><td>${esc(r.day)}</td><td>${r.views}</td></tr>`).join('')}</table></div>` : '<p class="note">No visits yet.</p>');
 
     const live = await aapi('/api/admin/streams?status=live');
-    $('#live').innerHTML = live.length ? `<table><tr><th>Stream</th><th>Channel</th><th>Viewers</th><th>Started</th><th></th></tr>${live.map(x => `<tr><td>${esc(x.title)}</td><td>${esc(x.channel_name)}</td><td>${x.viewer_count}</td><td>${new Date(x.created_at).toLocaleString()}</td><td><a href="/room.html?id=${x.id}">View</a> <button class="small secondary" onclick="endStream(${x.id})">End</button> <button class="small secondary" onclick="delStream(${x.id})">Remove</button></td></tr>`).join('')}</table>` : '<p class="note">No live streams right now.</p>';
+    $('#live').innerHTML = live.length ? `<div class="scroll-x"><table><tr><th>Stream</th><th>Channel</th><th>Viewers</th><th>Started</th><th></th></tr>${live.map(x => `<tr><td>${esc(x.title)}</td><td>${esc(x.channel_name)}</td><td>${x.viewer_count}</td><td>${new Date(x.created_at).toLocaleString()}</td><td><a href="/room.html?id=${x.id}">View</a> <button class="small danger" onclick="endStream(${x.id})">End</button> <button class="small danger" onclick="delStream(${x.id})">Remove</button></td></tr>`).join('')}</table></div>` : '<p class="note">No live streams right now.</p>';
 
     const chat = await aapi('/api/admin/chat?limit=100');
-    $('#chat').innerHTML = chat.length ? `<table><tr><th>Message</th><th>Author</th><th>Stream</th><th>When</th><th></th></tr>${chat.map(m => `<tr><td>${esc(m.text)}</td><td>${esc(m.author)}</td><td>${esc(m.stream_title || ('#' + m.stream_id))} — ${esc(m.channel_name || '')}</td><td>${new Date(m.created_at).toLocaleString()}</td><td><button class="small secondary" onclick="delChat(${m.id})">Delete</button></td></tr>`).join('')}</table>` : '<p class="note">No chat messages yet.</p>';
+    $('#chat').innerHTML = chat.length ? `<div class="scroll-x"><table><tr><th>Message</th><th>Author</th><th>Stream</th><th>When</th><th></th></tr>${chat.map(m => `<tr><td>${esc(m.text)}</td><td>${esc(m.author)}</td><td>${esc(m.stream_title || ('#' + m.stream_id))} — ${esc(m.channel_name || '')}</td><td>${new Date(m.created_at).toLocaleString()}</td><td><button class="small danger" onclick="delChat(${m.id})">Delete</button></td></tr>`).join('')}</table></div>` : '<p class="note">No chat messages yet.</p>';
 
     const prods = await aapi('/api/admin/products');
-    $('#products').innerHTML = prods.length ? `<table><tr><th>Product</th><th>Price</th><th>Stock</th><th>Pinned stream</th><th></th></tr>${prods.map(p => `<tr><td>${esc(p.name)}</td><td>$${Number(p.price).toFixed(2)}</td><td>${p.stock}</td><td>${p.stream_id ? 'Stream #' + p.stream_id : '—'}</td><td><button class="small secondary" onclick="delProduct(${p.id})">Remove</button></td></tr>`).join('')}</table>` : '<p class="note">No listings yet.</p>';
+    $('#products').innerHTML = prods.length ? `<div class="scroll-x"><table><tr><th>Product</th><th>Price</th><th>Stock</th><th>Pinned stream</th><th></th></tr>${prods.map(p => `<tr><td>${esc(p.name)}</td><td>$${Number(p.price).toFixed(2)}</td><td>${p.stock}</td><td>${p.stream_id ? 'Stream #' + p.stream_id : '—'}</td><td><button class="small danger" onclick="delProduct(${p.id})">Remove</button></td></tr>`).join('')}</table></div>` : '<p class="note">No listings yet.</p>';
 
     const orders = await aapi('/api/admin/orders');
-    $('#orders').innerHTML = orders.length ? `<table><tr><th>Order</th><th>Product</th><th>Buyer</th><th>Amount</th><th>Method</th><th>Status</th><th>When</th><th></th></tr>${orders.map(o => `<tr><td>#${o.id}</td><td>${esc(o.product_name || '')}</td><td>${esc(o.buyer)}</td><td>$${Number(o.amount).toFixed(2)}</td><td>${esc(o.payment_method)}</td><td>${esc(o.status || 'placed')}</td><td>${new Date(o.created_at).toLocaleString()}</td><td>${o.status === 'placed' ? `<button class="small secondary" onclick="setOrder(${o.id},'cancelled')">Cancel</button> <button class="small secondary" onclick="setOrder(${o.id},'refunded')">Refund</button>` : ''}</td></tr>`).join('')}</table>` : '<p class="note">No orders yet.</p>';
+    $('#orders').innerHTML = orders.length ? `<div class="scroll-x"><table><tr><th>Order</th><th>Product</th><th>Buyer</th><th>Amount</th><th>Method</th><th>Status</th><th>When</th><th></th></tr>${orders.map(o => `<tr><td>#${o.id}</td><td>${esc(o.product_name || '')}</td><td>${esc(o.buyer)}</td><td>$${Number(o.amount).toFixed(2)}</td><td>${esc(o.payment_method)}</td><td>${esc(o.status || 'placed')}</td><td>${new Date(o.created_at).toLocaleString()}</td><td>${o.status === 'placed' ? `<button class="small secondary" onclick="setOrder(${o.id},'cancelled')">Cancel</button> <button class="small secondary" onclick="setOrder(${o.id},'refunded')">Refund</button>` : ''}</td></tr>`).join('')}</table></div>` : '<p class="note">No orders yet.</p>';
 
     const chans = await aapi('/api/admin/channels');
-    $('#channels').innerHTML = chans.length ? `<table><tr><th>Channel</th><th>Streams</th><th>Live</th><th>Status</th><th></th></tr>${chans.map(c => `<tr><td>${esc(c.channel_name)}</td><td>${c.streams}</td><td>${c.live_streams}</td><td>${c.blocked ? '<span class="warn">Blocked</span>' : '<span class="ok">Active</span>'}</td><td>${c.blocked ? `<button class="small secondary" onclick="unblock('${esc(c.channel_name)}')">Unblock</button>` : `<button class="small secondary" onclick="block('${esc(c.channel_name)}')">Block</button>`}</td></tr>`).join('')}</table>` : '<p class="note">No channels yet.</p>';
+    $('#channels').innerHTML = chans.length ? `<div class="scroll-x"><table><tr><th>Channel</th><th>Streams</th><th>Live</th><th>Status</th><th></th></tr>${chans.map(c => `<tr><td>${esc(c.channel_name)}</td><td>${c.streams}</td><td>${c.live_streams}</td><td>${c.blocked ? '<span class="warn">Blocked</span>' : '<span class="ok">Active</span>'}</td><td>${c.blocked ? `<button class="small secondary" onclick="unblock('${esc(c.channel_name)}')">Unblock</button>` : `<button class="small danger" onclick="block('${esc(c.channel_name)}')">Block</button>`}</td></tr>`).join('')}</table></div>` : '<p class="note">No channels yet.</p>';
   } catch (e) { lock(); $('#gateMsg').textContent = 'Session ended: ' + e.message; }
 }
 async function endStream(id) { if (confirm('End this stream?')) { await aapi(`/api/admin/streams/${id}/end`, { method: 'POST' }); loadAll(); } }

@@ -5,7 +5,7 @@
 </nav></header>
 <main>
 <div id="room"></div>
-<div class="card"><video id="remoteVideo" autoplay muted playsinline></video>
+<div class="card" id="videoCard"><video id="remoteVideo" autoplay muted playsinline></video>
 <p id="videoState" class="warn">Connecting to host…</p>
 <div class="row"><button id="unmuteBtn" class="secondary">▶ Play with sound</button></div></div>
 
@@ -15,18 +15,24 @@
 <div class="card" style="flex:1;min-width:260px"><h2>Shop this stream</h2><div id="products"></div>
 <h3 style="margin-top:16px">List your own product</h3>
 <input id="pName" placeholder="Product name"><input id="pPrice" type="number" min="0.01" step="0.01" placeholder="Price ($)">
-<input id="pStock" type="number" min="0" step="1" placeholder="Stock"><button class="small" onclick="addProduct()">List product</button></div>
+<input id="pStock" type="number" min="0" step="1" placeholder="Stock"><button class="small" onclick="addProduct()">List product</button>
+<label class="ack"><input type="checkbox" id="ackSeller"> I agree to the <a href="/sales-policy.html" target="_blank">Seller &amp; Sales Policy</a> — no real money is charged through this site yet.</label></div>
 </div>
 
 <div id="checkoutModal" class="modal" style="display:none"><div class="box">
 <h3>Checkout</h3><p id="checkoutItem"></p>
-<label>Your name</label><input id="buyerName">
+<label>Your name</label><input id="buyerName" placeholder="Your name (optional)">
 <label>Payment method</label><div id="payChoices"></div>
 <p class="note">No real charging — this only records which payment method you chose. Saved methods are managed in the Dashboard.</p>
+<label class="ack"><input type="checkbox" id="ackTerms"> I understand this is not a real payment — my order is only recorded, no money is charged — and I agree to the <a href="/terms.html" target="_blank">Terms of Service</a> and <a href="/sales-policy.html" target="_blank">Seller &amp; Sales Policy</a>.</label>
 <div class="row"><button id="confirmBuy">Buy now</button><button class="secondary" onclick="closeCheckout()">Cancel</button></div>
 <p id="buyMsg"></p>
 </div></div>
 </main>
+<footer>
+<p><a href="/terms.html">Terms of Service</a> · <a href="/privacy.html">Privacy Policy</a> · <a href="/sales-policy.html">Seller &amp; Sales Policy</a></p>
+<p>18+ only · No real payments yet — orders record the payment method chosen, no money is charged.</p>
+</footer>
 <script src="/app.js"></script>
 <script>
 const params = new URLSearchParams(location.search);
@@ -48,12 +54,18 @@ async function init() {
     if ((await api('/api/follows')).some(f => f.channel === stream.channel_name)) {
       await fetch('/api/follows?channel=' + encodeURIComponent(stream.channel_name), { method: 'DELETE' });
       $('#followBtn').textContent = '+ Follow';
+      $('#followBtn').className = '';
     } else {
       await api('/api/follows', { method: 'POST', body: JSON.stringify({ channel: stream.channel_name }) });
       $('#followBtn').textContent = '✓ Following';
+      $('#followBtn').className = 'secondary';
     }
   };
-  if (stream.status !== 'live') { $('#videoState').textContent = 'This stream has ended.'; loadChatProducts(); return; }
+  if (stream.status !== 'live') {
+    const vc = document.getElementById('videoCard'); if (vc) vc.style.display = 'none';
+    $('#room').insertAdjacentHTML('beforeend', '<p class="note">This stream has ended. <a href="/">Back to Discover</a></p>');
+    loadChatProducts(); return;
+  }
   // Heartbeat (viewer count) + join signal
   const beat = async () => { const r = await api(`/api/streams/${streamId}/heartbeat`, { method: 'POST', body: JSON.stringify({ peer_id: myId }) }); const vc = $('#vc'); if (vc) vc.textContent = r.viewer_count; };
   await beat(); hbTimer = setInterval(beat, 10000);
@@ -89,8 +101,16 @@ async function handleOffer(offer) {
 }
 
 $('#unmuteBtn').onclick = async () => {
-  const v = $('#remoteVideo'); v.muted = false; v.volume = 1;
-  try { await v.play(); $('#videoState').textContent = '🔴 Live video from host with sound.'; } catch (e) { $('#videoState').textContent = 'Video is playing muted — tap again to enable sound.'; v.muted = true; }
+  const v = $('#remoteVideo');
+  if (!v.muted) {
+    v.muted = true;
+    $('#unmuteBtn').textContent = '▶ Play with sound';
+    $('#videoState').textContent = '🔴 Live video from host (muted — use Play with sound for audio).';
+    return;
+  }
+  v.muted = false; v.volume = 1;
+  try { await v.play(); $('#videoState').textContent = '🔴 Live video from host with sound.'; $('#unmuteBtn').textContent = '🔇 Mute'; }
+  catch (e) { $('#videoState').textContent = 'Video is playing muted — tap again to enable sound.'; v.muted = true; }
 };
 
 async function loadChatProducts() {
@@ -115,6 +135,7 @@ $('#chatInput').addEventListener('keydown', e => { if (e.key === 'Enter') sendCh
 async function addProduct() {
   const name = $('#pName').value.trim(), price = parseFloat($('#pPrice').value), stock = parseInt($('#pStock').value || '0', 10);
   if (!name || !(price > 0)) { toast('Product name and a price above $0 are required', 'warn'); return; }
+  if (!$('#ackSeller').checked) { toast('Please tick the seller terms box first', 'warn'); return; }
   await api('/api/products', { method: 'POST', body: JSON.stringify({ name, price, stock, stream_id: streamId }) });
   $('#pName').value = ''; $('#pPrice').value = ''; $('#pStock').value = ''; loadChatProducts(); toast('Product listed', 'ok');
 }
@@ -124,6 +145,7 @@ async function openCheckout(productId) {
   if (!selectedProduct) return;
   $('#checkoutItem').textContent = `${selectedProduct.name} — $${Number(selectedProduct.price).toFixed(2)}`;
   $('#buyMsg').textContent = '';
+  $('#ackTerms').checked = false;
   const saved = await api('/api/payment-methods');
   const def = saved.find(m => m.is_default) || saved[0];
   selectedMethod = def ? `${def.label} (${def.kind}${def.last4_or_handle ? ' •• ' + def.last4_or_handle : ''})` : ONE_TIME_METHODS[0];
@@ -135,6 +157,7 @@ async function openCheckout(productId) {
 }
 function closeCheckout() { $('#checkoutModal').style.display = 'none'; }
 $('#confirmBuy').onclick = async () => {
+  if (!$('#ackTerms').checked) { $('#buyMsg').textContent = 'Please tick the acknowledgment box first.'; return; }
   const buyer = $('#buyerName').value.trim() || displayName();
   try {
     const order = await api('/api/orders', { method: 'POST', body: JSON.stringify({ product_id: selectedProduct.id, stream_id: streamId, buyer, payment_method: selectedMethod }) });

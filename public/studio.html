@@ -5,7 +5,7 @@
 </nav><span class="live-pill" id="headerLivePill">● LIVE</span></header>
 <main>
 <h1>Studio</h1>
-<p class="note" style="margin-top:-8px;margin-bottom:18px">Set up your stream, preview your camera, then go live. Viewers connect peer-to-peer over WebRTC.</p>
+<p class="note" style="margin-top:-8px;margin-bottom:18px">Set up your stream, preview your camera, then go live. Viewers watch right in their browser — no app needed.</p>
 
 <div id="setup">
   <div class="studio-hero">
@@ -53,6 +53,7 @@
     <button id="endBtn" class="secondary">End stream</button>
     <a href="/dashboard.html"><button class="ghost">Open Dashboard</button></a>
     <a id="roomLink" href="#"><button class="ghost">Open room view</button></a>
+    <button class="ghost" onclick="copyRoomLink()">Copy room link</button>
   </div>
   <div class="row" style="align-items:flex-start">
     <div style="flex:2;min-width:260px">
@@ -71,10 +72,15 @@
       <input id="pPrice" type="number" min="0.01" step="0.01" placeholder="Price ($)">
       <input id="pStock" type="number" min="0" step="1" placeholder="Stock">
       <button class="small" onclick="addProduct()">Add product (pinned to this stream)</button>
+      <label class="ack"><input type="checkbox" id="ackSeller"> I agree to the <a href="/sales-policy.html" target="_blank">Seller &amp; Sales Policy</a> — no real money is charged through this site yet.</label>
     </div>
   </div>
 </div>
 </main>
+<footer>
+<p><a href="/terms.html">Terms of Service</a> · <a href="/privacy.html">Privacy Policy</a> · <a href="/sales-policy.html">Seller &amp; Sales Policy</a></p>
+<p>18+ only · No real payments yet — orders record the payment method chosen, no money is charged.</p>
+</footer>
 <script src="/app.js"></script>
 <script>
 const catSel = $('#category');
@@ -205,9 +211,16 @@ async function sendChat() {
 }
 $('#chatInput').addEventListener('keydown', e => { if (e.key === 'Enter') sendChat(); });
 
+async function copyRoomLink() {
+  const url = location.origin + '/room.html?id=' + streamId;
+  try { await navigator.clipboard.writeText(url); toast('Room link copied — share it anywhere', 'ok'); }
+  catch (e) { prompt('Copy this link:', url); }
+}
+
 async function addProduct() {
   const name = $('#pName').value.trim(), price = parseFloat($('#pPrice').value), stock = parseInt($('#pStock').value || '0', 10);
   if (!name || !(price > 0)) { toast('Product name and a price above $0 are required', 'warn'); return; }
+  if (!$('#ackSeller').checked) { toast('Please tick the seller terms box first', 'warn'); return; }
   try {
     await api('/api/products', { method: 'POST', body: JSON.stringify({ name, price, stock, stream_id: streamId }) });
     $('#pName').value = ''; $('#pPrice').value = ''; $('#pStock').value = '';

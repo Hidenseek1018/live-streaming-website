@@ -9,7 +9,7 @@
 <input id="q" type="search" placeholder="Search streams or channels…" style="flex:2;min-width:200px">
 <select id="cat" style="flex:1;min-width:140px"><option>All</option></select>
 </div>
-<div id="feed" class="tiktok-feed"></div>
+<div id="feed" class="tiktok-feed"><div class="feed-slide"><div class="feed-empty"><div class="icon">📡</div><h2>Finding live streams…</h2><p class="note">One moment while we load what's live.</p></div></div></div>
 <section class="browse">
 <h2>Shop the feed</h2>
 <div id="shopGrid" class="grid"></div>
@@ -25,6 +25,11 @@
 <div class="sheet-body" id="sheetChat"></div>
 <div class="sheet-foot"><input id="sheetInput" placeholder="Add a comment…" style="flex:1"><button class="small" onclick="sendSheetChat()">Send</button></div>
 </div>
+
+<footer>
+<p><a href="/terms.html">Terms of Service</a> · <a href="/privacy.html">Privacy Policy</a> · <a href="/sales-policy.html">Seller &amp; Sales Policy</a></p>
+<p>18+ only · No real payments yet — orders record the payment method chosen, no money is charged.</p>
+</footer>
 
 <script src="/app.js"></script>
 <script>
@@ -89,7 +94,7 @@ function slideHTML(s) {
     <div class="chan">${esc(s.channel_name)}</div>
     <h3>${esc(s.title)}</h3>
     <div class="meta">${esc(s.category)} · 👁 <span class="vc">${s.viewer_count}</span> watching · ❤️ <span class="lc">${s.like_count}</span></div>
-    <div><a href="/room.html?id=${s.id}">Watch in room →</a></div>
+    <div style="margin-top:12px"><a href="/room.html?id=${s.id}"><button class="small">▶ Watch in room</button></a></div>
   </div>
   <div class="feed-rail">
     <div class="rail-item"><button class="rail-btn" data-like="${s.id}">🤍</button><span class="rail-count like-count">${s.like_count}</span></div>
@@ -115,7 +120,7 @@ function renderSlides(live) {
         <ol>
           <li>Open <b>Studio</b> and set a channel name + title</li>
           <li>Preview your camera, then hit <b>Go live</b></li>
-          <li>Share the room link — viewers join over WebRTC</li>
+          <li>Share the room link — viewers join right from their browser</li>
         </ol>
       </div>
     </div></div>`;
@@ -132,10 +137,14 @@ async function renderBrowse(streams) {
     <div class="meta">${new Date(s.created_at).toLocaleString()}</div></div>`).join('') : '<p class="note">No ended streams yet.</p>';
   try {
     const prods = await api('/api/products');
-    $('#shopGrid').innerHTML = prods.length ? prods.map(p => `<div class="stream-card" onclick="location.href='${p.stream_id ? '/room.html?id=' + p.stream_id : '/dashboard.html'}'">
+    const streamById = new Map(streams.map(s => [s.id, s]));
+    $('#shopGrid').innerHTML = prods.length ? prods.map(p => {
+      const st = p.stream_id ? streamById.get(p.stream_id) : null;
+      return `<div class="stream-card" onclick="location.href='${p.stream_id ? '/room.html?id=' + p.stream_id : '/dashboard.html'}'">
       <h3 style="margin:10px 0 4px">${esc(p.name)}</h3>
       <div>$${Number(p.price).toFixed(2)} · ${p.stock} in stock</div>
-      <div class="meta">${p.stream_id ? 'Pinned to stream #' + p.stream_id + ' — shop in the stream →' : 'Listed on the Dashboard'}</div></div>`).join('') : '<p class="note">Nothing for sale yet.</p>';
+      <div class="meta">${st ? 'On ' + esc(st.channel_name) + '’s stream: ' + esc(st.title) : 'Listed on the Dashboard'}</div></div>`;
+    }).join('') : '<p class="note">Nothing for sale yet.</p>';
   } catch (e) { $('#shopGrid').innerHTML = '<p class="note">Could not load products.</p>'; }
   try {
     const act = await api('/api/activity?limit=20');

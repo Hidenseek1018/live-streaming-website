@@ -161,6 +161,61 @@ The site is an installable app — no app store, no separate download:
   an internet connection to stream, chat, or buy, and push notifications
   are not included.
 
+## UX polish (2026-11-14)
+
+Small, deliberate usability fixes across the five pages — same layout and
+features, easier to use, especially on phones:
+
+- **Discover:** the feed shows a "Finding live streams…" state while it
+  loads instead of a black screen; each live slide has a clear **Watch in
+  room** button; shop cards name the stream ("On Maya's stream: Cooking
+  live") instead of "Pinned to stream #3"; plain wording (no "WebRTC"
+  jargon for visitors).
+- **Studio:** the intro is in plain language; the live panel has a **Copy
+  room link** button so the host can share the stream in one tap; the
+  setup buttons stack full-width on phones.
+- **Room:** ended streams hide the black video box and show a clear
+  "This stream has ended" note with a link back; the sound button now
+  toggles (Play with sound / Mute) and shows its state; the Follow button
+  keeps its state consistent; checkout has a name placeholder.
+- **Dashboard / Admin:** every section shows a "Loading…" state while it
+  fetches; analytics pages are named (Home, Studio, Room…) instead of
+  raw paths; tables scroll sideways on phones instead of being cut off;
+  form inputs have minimum widths so they wrap cleanly; destructive
+  admin actions (End, Remove, Delete, Block) are styled red so they
+  cannot be mistaken for neutral ones.
+- **Everywhere:** a footer links the legal pages; the mobile header nav
+  scrolls instead of wrapping; small buttons are bigger tap targets on
+  phones; inputs are 16px on mobile so iOS does not zoom on focus;
+  buttons have a visible keyboard-focus outline.
+
+## Terms, privacy & sales policy
+
+Three plain-language legal pages, linked in the footer of every page:
+
+- **Terms of Service** (`/terms.html`) — 18+ only, what the site is, no
+  accounts, as-is availability.
+- **Privacy Policy** (`/privacy.html`) — what is collected (random visitor
+  cookie, age-check token, display name, chat, orders; last-4/handle only
+  for saved methods), what is not (no IPs, no trackers, no ads, nothing
+  sold), and how to reset it.
+- **Seller &amp; Sales Policy** (`/sales-policy.html`) — how sales work,
+  seller responsibilities, disputes, and listing removal.
+
+**Honesty built in:** all three pages — and the footer on every page —
+say plainly that checkout does **not** charge real money: orders only
+record the payment method chosen, and the site provides no buyer
+protection, escrow, or refunds. Each page also notes the terms are
+standard terms, not legal advice, and should be reviewed by a lawyer
+before real money moves through the site.
+
+**Acknowledgments:** at checkout, the buyer must tick a box agreeing to
+the Terms and Sales Policy and confirming the order is only recorded
+before the order can be placed. Anyone listing a product (Studio, room,
+or Dashboard) must tick a seller-terms box first. The boxes are
+client-side checks on the existing forms — the server still enforces the
+age gate on every protected action.
+
 ## Deploy — Fly.io (free allowance)
 
 Fly.io was picked because, unlike Render's free tier, it offers a persistent
