@@ -114,9 +114,9 @@ $('#chatInput').addEventListener('keydown', e => { if (e.key === 'Enter') sendCh
 
 async function addProduct() {
   const name = $('#pName').value.trim(), price = parseFloat($('#pPrice').value), stock = parseInt($('#pStock').value || '0', 10);
-  if (!name || !(price > 0)) { alert('Product name and a price above $0 are required.'); return; }
+  if (!name || !(price > 0)) { toast('Product name and a price above $0 are required', 'warn'); return; }
   await api('/api/products', { method: 'POST', body: JSON.stringify({ name, price, stock, stream_id: streamId }) });
-  $('#pName').value = ''; $('#pPrice').value = ''; $('#pStock').value = ''; loadChatProducts();
+  $('#pName').value = ''; $('#pPrice').value = ''; $('#pStock').value = ''; loadChatProducts(); toast('Product listed', 'ok');
 }
 
 async function openCheckout(productId) {
@@ -139,8 +139,8 @@ $('#confirmBuy').onclick = async () => {
   try {
     const order = await api('/api/orders', { method: 'POST', body: JSON.stringify({ product_id: selectedProduct.id, stream_id: streamId, buyer, payment_method: selectedMethod }) });
     $('#buyMsg').innerHTML = `<span class="ok">Order #${order.id} recorded — paid with ${esc(order.payment_method)}. ${order.remaining_stock} left in stock. No real charge was made.</span>`;
-    loadChatProducts();
-  } catch (e) { $('#buyMsg').textContent = 'Could not complete purchase: ' + e.message; }
+    loadChatProducts(); toast('Order recorded (no real charge)', 'ok');
+  } catch (e) { $('#buyMsg').textContent = 'Could not complete purchase: ' + e.message; toast(e.message || 'Purchase failed', 'err'); }
 };
 init();
 </script></body></html>

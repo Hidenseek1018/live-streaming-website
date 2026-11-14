@@ -26,12 +26,42 @@ function displayName() {
 const CATEGORIES = ['Gaming', 'Music', 'Shopping', 'Talk', 'Sports', 'Cooking', 'Other'];
 const ONE_TIME_METHODS = ['Card', 'PayPal', 'Apple Pay', 'Google Pay', 'Cash App', 'Bank transfer'];
 
+/* ---- Toast notifications ---- */
+function ensureToastRoot() {
+  let root = document.getElementById('toast-root');
+  if (!root) {
+    root = document.createElement('div');
+    root.id = 'toast-root';
+    document.body.appendChild(root);
+  }
+  return root;
+}
+function toast(message, type = 'ok', ms = 3200) {
+  const root = ensureToastRoot();
+  const el = document.createElement('div');
+  el.className = 'toast ' + (type || '');
+  el.textContent = message;
+  root.appendChild(el);
+  setTimeout(() => {
+    el.style.opacity = '0';
+    el.style.transition = 'opacity .2s';
+    setTimeout(() => el.remove(), 220);
+  }, ms);
+}
+
+/* ---- Active nav highlight ---- */
+(function markActiveNav() {
+  const path = location.pathname.replace(/\/$/, '') || '/';
+  document.querySelectorAll('header nav a').forEach(a => {
+    const href = a.getAttribute('href') || '';
+    const normalized = href.replace(/\/$/, '') || '/';
+    if (normalized === path || (path === '/' && href === '/')) a.classList.add('active');
+    else if (path.endsWith(href) && href !== '/') a.classList.add('active');
+  });
+})();
+
 // ---- Age verification (18+) ----
-// The server is the authority: it issues a random token (HttpOnly cookie)
-// after a date-of-birth check and enforces it on protected actions.
-// localStorage only remembers the expiry so verified visitors are not
-// asked again on every visit; the cookie is what the server checks.
-const AGE_TTL_MS = 30 * 24 * 60 * 60 * 1000; // 30 days
+const AGE_TTL_MS = 30 * 24 * 60 * 60 * 1000;
 const AGE_KEY = 'age_verified_until';
 function ageStoredValid() {
   try { return Number(localStorage.getItem(AGE_KEY) || 0) > Date.now(); } catch (e) { return false; }
@@ -101,14 +131,11 @@ async function submitAge() {
   try {
     const r = await fetch('/api/age/verify', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ day: d, month: m, year: y }) });
     const data = await r.json().catch(() => ({}));
-    if (r.ok && data.verified) { ageRemember(); hideAgeGate(); return; }
+    if (r.ok && data.verified) { ageRemember(); hideAgeGate(); toast('Welcome — age verified', 'ok'); return; }
     if (data.code === 'underage') { showAgeBlocked(); return; }
     err.textContent = data.error || 'Verification failed — try again.';
   } catch (e) { err.textContent = 'Could not reach the server — try again.'; }
 }
-// Runs on every page except the admin panel (which has its own passcode).
-// Shows the gate immediately so the page can't be used before the check,
-// then hides it once the server confirms the visitor is verified.
 async function checkAgeGate() {
   if (location.pathname === '/admin.html') return;
   if (ageStoredValid()) return;

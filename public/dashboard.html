@@ -70,16 +70,16 @@ async function saveMethod() {
   const label = $('#mLabel').value.trim(), kind = $('#mKind').value, last4 = $('#mLast4').value.trim();
   if (!label) { $('#mMsg').textContent = 'Give the method a nickname first.'; return; }
   await api('/api/payment-methods', { method: 'POST', body: JSON.stringify({ label, kind, last4_or_handle: last4 }) });
-  $('#mLabel').value = ''; $('#mLast4').value = ''; $('#mMsg').textContent = 'Saved.'; load();
+  $('#mLabel').value = ''; $('#mLast4').value = ''; $('#mMsg').textContent = 'Saved.'; toast('Payment method saved', 'ok'); load();
 }
 async function setDefault(id) { await api(`/api/payment-methods/${id}/default`, { method: 'POST' }); load(); }
 async function delMethod(id) { await api(`/api/payment-methods/${id}`, { method: 'DELETE' }); load(); }
 async function unfollow(ch) { await fetch('/api/follows?channel=' + encodeURIComponent(ch), { method: 'DELETE' }); load(); }
 async function addProduct() {
   const name = $('#pName').value.trim(), price = parseFloat($('#pPrice').value), stock = parseInt($('#pStock').value || '0', 10);
-  if (!name || !(price > 0)) { alert('Product name and a price above $0 are required.'); return; }
+  if (!name || !(price > 0)) { toast('Product name and a price above $0 are required', 'warn'); return; }
   await api('/api/products', { method: 'POST', body: JSON.stringify({ name, price, stock }) });
-  $('#pName').value = ''; $('#pPrice').value = ''; $('#pStock').value = ''; load();
+  $('#pName').value = ''; $('#pPrice').value = ''; $('#pStock').value = ''; toast('Product listed', 'ok'); load();
 }
 load();
 </script></body></html>

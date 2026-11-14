@@ -2,7 +2,7 @@
 <title>Live — Discover</title><link rel="stylesheet" href="/style.css"></head><body>
 <header><div class="logo">Live<span>Stream</span></div><nav>
 <a href="/">Discover</a><a href="/studio.html">Studio</a><a href="/dashboard.html">Dashboard</a><a href="/admin.html">Admin</a>
-</nav></header>
+</nav><span class="live-pill" id="headerLivePill">● LIVE</span></header>
 <main class="feed-page">
 <div class="stories-row" id="stories"></div>
 <div class="feed-search row">
@@ -102,7 +102,23 @@ function slideHTML(s) {
 
 function renderSlides(live) {
   if (!live.length) {
-    feedEl.innerHTML = `<div class="feed-slide"><div class="feed-empty"><h2>No one is live right now</h2><p class="note">Be the first to go live, or check back soon.</p><a href="/studio.html"><button>Go live in the Studio</button></a></div></div>`;
+    feedEl.innerHTML = `<div class="feed-slide"><div class="feed-empty empty-state">
+      <div class="icon">📡</div>
+      <h2>No one is live right now</h2>
+      <p>Be the first to go live, or check back soon. Streams appear here as soon as someone starts broadcasting.</p>
+      <div class="actions">
+        <a href="/studio.html"><button>🔴 Go live in Studio</button></a>
+        <a href="/dashboard.html"><button class="secondary">Open Dashboard</button></a>
+      </div>
+      <div class="tips">
+        <strong>Quick start</strong>
+        <ol>
+          <li>Open <b>Studio</b> and set a channel name + title</li>
+          <li>Preview your camera, then hit <b>Go live</b></li>
+          <li>Share the room link — viewers join over WebRTC</li>
+        </ol>
+      </div>
+    </div></div>`;
     return;
   }
   feedEl.innerHTML = live.map(slideHTML).join('');
