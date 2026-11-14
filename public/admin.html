@@ -5,7 +5,7 @@
 </nav></header>
 <main>
 <h1>Site admin</h1>
-<p class="note">Moderate streams, chat, products, orders and channels. Cancelling or refunding an order only changes its record — no money moves anywhere in this app.</p>
+<p class="note">Moderate streams, chat, products, orders and channels. Cancel / Refund (record) only change the record — no money moves. <b>Refund via Stripe</b> returns real money to the buyer's card for paid card orders, and restores the stock.</p>
 
 <div class="card" id="gate">
 <h2>Enter admin passcode</h2>
@@ -28,13 +28,15 @@
 <div class="card"><h2>Recent chat (all streams)</h2><div id="chat"><p class="note">Loading…</p></div></div>
 <div class="card"><h2>Products</h2><div id="products"><p class="note">Loading…</p></div></div>
 <div class="card"><h2>Orders</h2><div id="orders"><p class="note">Loading…</p></div></div>
+<div class="card"><h2>Buyer problem reports</h2><p class="note">Buyers report a problem with an order here. Resolving a report is bookkeeping only — it never refunds by itself; use <b>Refund via Stripe</b> on the order for that.</p><div id="disputes"><p class="note">Loading…</p></div></div>
+<div class="card"><h2>Listing reports</h2><p class="note">Visitors flagging listings as misleading, prohibited, or a scam. Counts also show on Products and Channels below — repeat reports are the signal to block a channel.</p><div id="listingReports"><p class="note">Loading…</p></div></div>
 <div class="card"><h2>Recordings</h2><div id="recordings"><p class="note">Loading…</p></div></div>
 <div class="card"><h2>Channels</h2><div id="channels"><p class="note">Loading…</p></div></div>
 </div>
 </main>
 <footer>
 <p><a href="/terms.html">Terms of Service</a> · <a href="/privacy.html">Privacy Policy</a> · <a href="/sales-policy.html">Seller &amp; Sales Policy</a></p>
-<p>18+ only · No real payments yet — orders record the payment method chosen, no money is charged.</p>
+<p id="footerPayNote">18+ only · No real payments yet — orders record the payment method chosen, no money is charged.</p>
 </footer>
 <script src="/app.js"></script>
 <script>
@@ -70,12 +72,14 @@ function lock() {
 async function loadAll() {
   try {
     const s = await aapi('/api/admin/stats');
+    const stripeOn = !!s.stripe_enabled;
     $('#stats').innerHTML = [
       ['Live streams', s.live_streams], ['Total streams', s.total_streams], ['Channels', s.channels],
       ['Blocked channels', s.blocked_channels], ['Viewers now', s.viewers], ['Products', s.products],
       ['Orders', s.orders], ['Cancelled / refunded', s.cancelled_orders],
       ['Revenue (active orders)', '$' + Number(s.revenue).toFixed(2)],
       ['Recordings', s.recordings || 0],
+      ['Open problem reports', s.open_disputes || 0], ['Listing reports', s.listing_reports || 0],
       ['Total visits', s.total_visits], ['Unique visitors', s.unique_visitors], ['Visits today', s.visits_today],
     ].map(([k, v]) => `<div class="stat"><b>${v}</b><span>${k}</span></div>`).join('');
 
@@ -90,13 +94,33 @@ async function loadAll() {
     $('#chat').innerHTML = chat.length ? `<div class="scroll-x"><table><tr><th>Message</th><th>Author</th><th>Stream</th><th>When</th><th></th></tr>${chat.map(m => `<tr><td>${esc(m.text)}</td><td>${esc(m.author)}</td><td>${esc(m.stream_title || ('#' + m.stream_id))} — ${esc(m.channel_name || '')}</td><td>${new Date(m.created_at).toLocaleString()}</td><td><button class="small danger" onclick="delChat(${m.id})">Delete</button></td></tr>`).join('')}</table></div>` : '<p class="note">No chat messages yet.</p>';
 
     const prods = await aapi('/api/admin/products');
-    $('#products').innerHTML = prods.length ? `<div class="scroll-x"><table><tr><th>Product</th><th>Price</th><th>Stock</th><th>Pinned stream</th><th></th></tr>${prods.map(p => `<tr><td>${esc(p.name)}</td><td>$${Number(p.price).toFixed(2)}</td><td>${p.stock}</td><td>${p.stream_id ? 'Stream #' + p.stream_id : '—'}</td><td><button class="small danger" onclick="delProduct(${p.id})">Remove</button></td></tr>`).join('')}</table></div>` : '<p class="note">No listings yet.</p>';
+    $('#products').innerHTML = prods.length ? `<div class="scroll-x"><table><tr><th>Product</th><th>Price</th><th>Stock</th><th>Pinned stream</th><th>Reports</th><th></th></tr>${prods.map(p => `<tr><td>${esc(p.name)}</td><td>$${Number(p.price).toFixed(2)}</td><td>${p.stock}</td><td>${p.stream_id ? 'Stream #' + p.stream_id : '—'}</td><td>${p.report_count ? `<b class="warn">${p.report_count}</b>` : '0'}</td><td><button class="small danger" onclick="delProduct(${p.id})">Remove</button></td></tr>`).join('')}</table></div>` : '<p class="note">No listings yet.</p>';
 
     const orders = await aapi('/api/admin/orders');
-    $('#orders').innerHTML = orders.length ? `<div class="scroll-x"><table><tr><th>Order</th><th>Product</th><th>Buyer</th><th>Amount</th><th>Method</th><th>Status</th><th>When</th><th></th></tr>${orders.map(o => `<tr><td>#${o.id}</td><td>${esc(o.product_name || '')}</td><td>${esc(o.buyer)}</td><td>$${Number(o.amount).toFixed(2)}</td><td>${esc(o.payment_method)}</td><td>${esc(o.status || 'placed')}${o.payment_status ? ' · ' + esc(o.payment_status) : ''}</td><td>${new Date(o.created_at).toLocaleString()}</td><td>${o.status === 'placed' ? `<button class="small secondary" onclick="setOrder(${o.id},'cancelled')">Cancel</button> <button class="small secondary" onclick="setOrder(${o.id},'refunded')">Refund</button>` : ''}</td></tr>`).join('')}</table></div>` : '<p class="note">No orders yet.</p>';
+    const DISPUTE_LABELS = { not_as_described: 'Not as described', never_arrived: 'Never arrived', damaged: 'Damaged / broken', other: 'Other' };
+    $('#orders').innerHTML = orders.length ? `<div class="scroll-x"><table><tr><th>Order</th><th>Product</th><th>Buyer</th><th>Amount</th><th>Method</th><th>Status</th><th>When</th><th></th></tr>${orders.map(o => {
+      let actions = '';
+      if (o.status === 'placed') {
+        // Paid card orders get a real Stripe refund (money back to the
+        // buyer's card); the record-only Refund stays for record-only orders.
+        if (stripeOn && o.payment_status === 'paid') {
+          actions = `<button class="small secondary" onclick="setOrder(${o.id},'cancelled')">Cancel</button> <button class="small danger" onclick="refundOrder(${o.id},${Number(o.amount)})">Refund via Stripe</button>`;
+        } else {
+          actions = `<button class="small secondary" onclick="setOrder(${o.id},'cancelled')">Cancel</button> <button class="small secondary" onclick="setOrder(${o.id},'refunded')">Refund</button>`;
+        }
+      }
+      return `<tr><td>#${o.id}</td><td>${esc(o.product_name || '')}</td><td>${esc(o.buyer)}</td><td>$${Number(o.amount).toFixed(2)}</td><td>${esc(o.payment_method)}</td><td>${esc(o.status || 'placed')}${o.payment_status ? ' · ' + esc(o.payment_status) : ''}${o.stripe_refund_id ? ' · ' + esc(o.stripe_refund_id) : ''}</td><td>${new Date(o.created_at).toLocaleString()}</td><td>${actions}</td></tr>`;
+    }).join('')}</table></div>` : '<p class="note">No orders yet.</p>';
+
+    const disputes = await aapi('/api/admin/disputes');
+    $('#disputes').innerHTML = disputes.length ? `<div class="scroll-x"><table><tr><th>Report</th><th>Order</th><th>Product</th><th>Buyer</th><th>Amount</th><th>Problem</th><th>Note</th><th>When</th><th>Status</th><th></th></tr>${disputes.map(d => `<tr><td>#${d.id}</td><td>#${d.order_id}</td><td>${esc(d.product_name || '')}</td><td>${esc(d.buyer || '')}</td><td>$${Number(d.amount || 0).toFixed(2)}</td><td>${esc(DISPUTE_LABELS[d.reason] || d.reason)}</td><td>${esc(d.note || '')}</td><td>${new Date(d.created_at).toLocaleString()}</td><td>${d.status === 'open' ? '<span class="warn">Open</span>' : '<span class="ok">Resolved</span>'}</td><td>${d.status === 'open' ? `<button class="small secondary" onclick="resolveDispute(${d.id})">Mark resolved</button>` : ''}</td></tr>`).join('')}</table></div>` : '<p class="note">No buyer problem reports yet.</p>';
+
+    const LISTING_LABELS = { misleading: 'Misleading description', prohibited: 'Prohibited / illegal item', scam: 'Scam / fraud', other: 'Other' };
+    const reports = await aapi('/api/admin/listing-reports');
+    $('#listingReports').innerHTML = reports.length ? `<div class="scroll-x"><table><tr><th>Report</th><th>Listing</th><th>Channel</th><th>Reason</th><th>Note</th><th>When</th></tr>${reports.map(r => `<tr><td>#${r.id}</td><td>${esc(r.product_name || ('Product #' + r.product_id))}</td><td>${esc(r.channel_name || '—')}</td><td>${esc(LISTING_LABELS[r.reason] || r.reason)}</td><td>${esc(r.note || '')}</td><td>${new Date(r.created_at).toLocaleString()}</td></tr>`).join('')}</table></div>` : '<p class="note">No listing reports yet.</p>';
 
     const chans = await aapi('/api/admin/channels');
-    $('#channels').innerHTML = chans.length ? `<div class="scroll-x"><table><tr><th>Channel</th><th>Streams</th><th>Live</th><th>Status</th><th></th></tr>${chans.map(c => `<tr><td>${esc(c.channel_name)}</td><td>${c.streams}</td><td>${c.live_streams}</td><td>${c.blocked ? '<span class="warn">Blocked</span>' : '<span class="ok">Active</span>'}</td><td>${c.blocked ? `<button class="small secondary" onclick="unblock('${esc(c.channel_name)}')">Unblock</button>` : `<button class="small danger" onclick="block('${esc(c.channel_name)}')">Block</button>`}</td></tr>`).join('')}</table></div>` : '<p class="note">No channels yet.</p>';
+    $('#channels').innerHTML = chans.length ? `<div class="scroll-x"><table><tr><th>Channel</th><th>Streams</th><th>Live</th><th>Reports</th><th>Status</th><th></th></tr>${chans.map(c => `<tr><td>${esc(c.channel_name)}</td><td>${c.streams}</td><td>${c.live_streams}</td><td>${c.report_count ? `<b class="warn">${c.report_count}</b>` : '0'}</td><td>${c.blocked ? '<span class="warn">Blocked</span>' : '<span class="ok">Active</span>'}</td><td>${c.blocked ? `<button class="small secondary" onclick="unblock('${esc(c.channel_name)}')">Unblock</button>` : `<button class="small danger" onclick="block('${esc(c.channel_name)}')">Block</button>`}</td></tr>`).join('')}</table></div>` : '<p class="note">No channels yet.</p>';
 
     const recs = await aapi('/api/admin/recordings');
     $('#recordings').innerHTML = recs.length ? `<div class="scroll-x"><table><tr><th>Recording</th><th>Channel</th><th>Length</th><th>Size</th><th>Recorded</th><th></th></tr>${recs.map(r => `<tr><td>${esc(r.title || 'Untitled stream')}</td><td>${esc(r.channel_name)}</td><td>${fmtDuration(r.duration_seconds)}</td><td>${fmtSize(r.size_bytes)}</td><td>${new Date(r.created_at).toLocaleString()}</td><td><a href="/replay.html?id=${r.id}">Watch</a> <button class="small danger" onclick="delRecording(${r.id})">Delete</button></td></tr>`).join('')}</table></div>` : '<p class="note">No recordings yet.</p>';
@@ -107,6 +131,22 @@ async function delStream(id) { if (confirm('Remove this stream and its chat hist
 async function delChat(id) { await aapi(`/api/admin/chat/${id}`, { method: 'DELETE' }); loadAll(); }
 async function delProduct(id) { if (confirm('Remove this listing?')) { await aapi(`/api/admin/products/${id}`, { method: 'DELETE' }); loadAll(); } }
 async function setOrder(id, status) { if (confirm(`Mark order #${id} as ${status}? This only changes the record — no money moves.`)) { await aapi(`/api/admin/orders/${id}/status`, { method: 'POST', body: JSON.stringify({ status }) }); loadAll(); } }
+async function refundOrder(id, amount) {
+  if (!confirm(`Refund order #${id} ($${Number(amount).toFixed(2)}) through Stripe? The money goes back to the buyer's original card and the stock is restored. This moves real money and cannot be undone.`)) return;
+  try {
+    const r = await aapi(`/api/admin/orders/${id}/refund`, { method: 'POST' });
+    toast(`Order #${id} refunded via Stripe${r.refund_id ? ' (' + r.refund_id + ')' : ''}`, 'ok');
+  } catch (e) {
+    toast('Refund failed: ' + e.message, 'err');
+  }
+  loadAll();
+}
+async function resolveDispute(id) {
+  if (confirm(`Mark report #${id} as resolved? This does not refund the order — use "Refund via Stripe" on the order for that.`)) {
+    await aapi(`/api/admin/disputes/${id}/resolve`, { method: 'POST' });
+    loadAll();
+  }
+}
 async function block(ch) { if (confirm(`Block ${ch} from going live? Any of their live streams end immediately.`)) { await aapi('/api/admin/channels/block', { method: 'POST', body: JSON.stringify({ channel: ch }) }); loadAll(); } }
 async function unblock(ch) { await aapi('/api/admin/channels/unblock', { method: 'POST', body: JSON.stringify({ channel: ch }) }); loadAll(); }
 async function delRecording(id) { if (confirm('Delete this recording? Viewers will no longer be able to watch the replay.')) { await aapi(`/api/admin/recordings/${id}`, { method: 'DELETE' }); loadAll(); } }

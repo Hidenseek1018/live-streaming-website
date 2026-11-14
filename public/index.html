@@ -30,7 +30,7 @@
 
 <footer>
 <p><a href="/terms.html">Terms of Service</a> · <a href="/privacy.html">Privacy Policy</a> · <a href="/sales-policy.html">Seller &amp; Sales Policy</a></p>
-<p>18+ only · No real payments yet — orders record the payment method chosen, no money is charged.</p>
+<p id="footerPayNote">18+ only · No real payments yet — orders record the payment method chosen, no money is charged.</p>
 </footer>
 
 <script src="/app.js"></script>
@@ -152,7 +152,8 @@ async function renderBrowse(streams) {
       return `<div class="stream-card" onclick="location.href='${p.stream_id ? '/room.html?id=' + p.stream_id : '/dashboard.html'}'">
       <h3 style="margin:10px 0 4px">${esc(p.name)}</h3>
       <div>$${Number(p.price).toFixed(2)} · ${p.stock} in stock</div>
-      <div class="meta">${st ? 'On ' + esc(st.channel_name) + '’s stream: ' + esc(st.title) : 'Listed on the Dashboard'}</div></div>`;
+      <div class="meta">${st ? 'On ' + esc(st.channel_name) + '’s stream: ' + esc(st.title) : 'Listed on the Dashboard'}</div>
+      <div style="margin-top:8px"><button class="small secondary" onclick="event.stopPropagation();reportListing(${p.id}, ${p.stream_id || 'null'})">Report this listing</button></div></div>`;
     }).join('') : '<p class="note">Nothing for sale yet.</p>';
   } catch (e) { $('#shopGrid').innerHTML = '<p class="note">Could not load products.</p>'; }
   try {
@@ -161,6 +162,13 @@ async function renderBrowse(streams) {
       ? `<p>💬 <b>${esc(a.actor)}</b> on <b>${esc(a.stream_title || '')}</b> (${esc(a.channel_name || '')}): ${esc(a.detail)}</p>`
       : `<p>🛍 <b>${esc(a.actor)}</b> bought <b>${esc(a.detail)}</b>${a.stream_title ? ` on ${esc(a.stream_title)}` : ''}</p>`).join('') : '<p class="note">No activity yet.</p>';
   } catch (e) { $('#activity').innerHTML = '<p class="note">Could not load activity.</p>'; }
+}
+
+// ---- Report a listing (from a shop card) ----
+// Pinned listings open the room's report form; unpinned ones open the
+// Dashboard's. The report itself is filed from that page.
+function reportListing(id, streamId) {
+  location.href = streamId ? `/room.html?id=${streamId}&report=${id}` : `/dashboard.html?report=${id}`;
 }
 
 // ---- Live video in the active slide (same viewer flow as the room) ----

@@ -19,6 +19,23 @@
 <label class="ack" id="sellerAckLabel"><input type="checkbox" id="ackSeller"> I agree to the <a href="/sales-policy.html" target="_blank">Seller &amp; Sales Policy</a> — no real money is charged through this site yet.</label></div>
 </div>
 
+<div class="card"><h2>Report a problem with an order</h2>
+<p class="note">Bought something that wasn't as described, never arrived, or arrived damaged? Tell us — the site owner reviews every report and can refund a paid order through Stripe.</p>
+<div class="row"><input id="dOrder" type="number" min="1" step="1" placeholder="Order number (e.g. 12)" style="flex:1;min-width:140px">
+<select id="dReason" style="flex:2;min-width:180px"><option value="not_as_described">Item not as described</option><option value="never_arrived">Never arrived</option><option value="damaged">Damaged or broken</option><option value="other">Something else</option></select></div>
+<input id="dNote" placeholder="What happened? (optional)" style="margin-top:8px">
+<div class="row"><button class="small" onclick="submitDispute()">Send report</button><span id="dMsg" class="note"></span></div>
+</div>
+
+<div id="reportModal" class="modal" style="display:none"><div class="box">
+<h3>Report this listing</h3><p id="reportItem" class="note"></p>
+<label>What's wrong with this listing?</label>
+<select id="repReason" style="width:100%"><option value="misleading">Misleading description</option><option value="prohibited">Prohibited or illegal item</option><option value="scam">Scam / fraud</option><option value="other">Something else</option></select>
+<label style="margin-top:8px">Anything to add? (optional)</label><input id="repNote" placeholder="Short note (optional)">
+<div class="row"><button class="small" onclick="submitReport()">Send report</button><button class="secondary" onclick="closeReport()">Cancel</button></div>
+<p id="repMsg"></p>
+</div></div>
+
 <div id="checkoutModal" class="modal" style="display:none"><div class="box">
 <h3>Checkout</h3><p id="checkoutItem"></p>
 <label>Your name</label><input id="buyerName" placeholder="Your name (optional)">
@@ -82,6 +99,9 @@ async function init() {
   pollTimer = setInterval(pollSignals, 1500);
   chatTimer = setInterval(loadChatProducts, 3000); loadChatProducts();
   setTimeout(() => { if (!gotVideo) $('#videoState').textContent = "Couldn't establish a live video connection — the host's camera may be off, or the peer connection couldn't be established. Chat and shopping still work below."; }, 20000);
+  // Deep link from the Discover feed's Report button on a shop card.
+  const reportId = Number(params.get('report'));
+  if (reportId) setTimeout(() => openReport(reportId), 600);
 }
 
 async function pollSignals() {
@@ -130,7 +150,8 @@ async function loadChatProducts() {
   $('#products').innerHTML = (prods.length ? prods : all).map(p => `
     <div class="row" style="justify-content:space-between;border-bottom:1px solid #2a2f3a;padding:8px 0">
       <span><b>${esc(p.name)}</b><br>$${Number(p.price).toFixed(2)} · ${p.stock} in stock</span>
-      <button class="small" ${p.stock <= 0 ? 'disabled' : ''} onclick='openCheckout(${p.id})'>Buy</button>
+      <span><button class="small" ${p.stock <= 0 ? 'disabled' : ''} onclick='openCheckout(${p.id})'>Buy</button>
+      <button class="small secondary" onclick='openReport(${p.id})'>Report</button></span>
     </div>`).join('') || '<p class="note">Nothing for sale on this stream yet.</p>';
   window._products = (prods.length ? prods : all);
 }
@@ -181,6 +202,38 @@ async function openCheckout(productId) {
   $('#checkoutModal').style.display = 'flex';
 }
 function closeCheckout() { $('#checkoutModal').style.display = 'none'; }
+
+// ---- Reports: flag a listing, or a problem with an order ----
+// Listing reports go to the admin panel (counts per listing/channel).
+// Order problems become disputes the admin reviews and can refund.
+let reportProductId = null;
+function openReport(productId) {
+  const p = (window._products || []).find(x => x.id === productId);
+  reportProductId = productId;
+  $('#reportItem').textContent = p ? `${p.name} — $${Number(p.price).toFixed(2)}` : 'Listing #' + productId;
+  $('#repNote').value = ''; $('#repMsg').textContent = '';
+  $('#reportModal').style.display = 'flex';
+}
+function closeReport() { $('#reportModal').style.display = 'none'; reportProductId = null; }
+async function submitReport() {
+  if (!reportProductId) return;
+  try {
+    await api('/api/listing-reports', { method: 'POST', body: JSON.stringify({ product_id: reportProductId, reason: $('#repReason').value, note: $('#repNote').value.trim() }) });
+    $('#repMsg').innerHTML = '<span class="ok">Report sent — the site owner reviews flagged listings.</span>';
+    toast('Listing reported', 'ok');
+    setTimeout(closeReport, 900);
+  } catch (e) { $('#repMsg').textContent = 'Could not send report: ' + e.message; toast(e.message || 'Report failed', 'err'); }
+}
+async function submitDispute() {
+  const orderId = parseInt($('#dOrder').value, 10);
+  if (!orderId) { $('#dMsg').textContent = 'Enter your order number first.'; return; }
+  try {
+    const d = await api('/api/disputes', { method: 'POST', body: JSON.stringify({ order_id: orderId, reason: $('#dReason').value, note: $('#dNote').value.trim() }) });
+    $('#dMsg').innerHTML = `<span class="ok">Report #${d.id} sent — the site owner will review it.</span>`;
+    $('#dOrder').value = ''; $('#dNote').value = '';
+    toast('Problem reported', 'ok');
+  } catch (e) { $('#dMsg').textContent = 'Could not send report: ' + e.message; toast(e.message || 'Report failed', 'err'); }
+}
 $('#confirmBuy').onclick = async () => {
   if (!$('#ackTerms').checked) { $('#buyMsg').textContent = 'Please tick the acknowledgment box first.'; return; }
   const buyer = $('#buyerName').value.trim() || displayName();

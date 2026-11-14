@@ -30,6 +30,21 @@
 <div id="productList"><p class="note">Loading…</p></div></div>
 
 <div class="card"><h2>Orders received</h2><div id="orders"><p class="note">Loading…</p></div></div>
+<div class="card"><h2>Report a problem with an order</h2>
+<p class="note">Bought something that wasn't as described, never arrived, or arrived damaged? Your order number is in the table above. The site owner reviews every report and can refund a paid order through Stripe.</p>
+<div class="row"><input id="dOrder" type="number" min="1" step="1" placeholder="Order number (e.g. 12)" style="flex:1;min-width:140px">
+<select id="dReason" style="flex:2;min-width:180px"><option value="not_as_described">Item not as described</option><option value="never_arrived">Never arrived</option><option value="damaged">Damaged or broken</option><option value="other">Something else</option></select></div>
+<input id="dNote" placeholder="What happened? (optional)" style="margin-top:8px">
+<div class="row"><button class="small" onclick="submitDispute()">Send report</button><span id="dMsg" class="note"></span></div>
+</div>
+<div id="reportModal" class="modal" style="display:none"><div class="box">
+<h3>Report this listing</h3><p id="reportItem" class="note"></p>
+<label>What's wrong with this listing?</label>
+<select id="repReason" style="width:100%"><option value="misleading">Misleading description</option><option value="prohibited">Prohibited or illegal item</option><option value="scam">Scam / fraud</option><option value="other">Something else</option></select>
+<label style="margin-top:8px">Anything to add? (optional)</label><input id="repNote" placeholder="Short note (optional)">
+<div class="row"><button class="small" onclick="submitReport()">Send report</button><button class="secondary" onclick="closeReport()">Cancel</button></div>
+<p id="repMsg"></p>
+</div></div>
 <div class="card"><h2>Stream history</h2><div id="history"><p class="note">Loading…</p></div></div>
 <div class="card"><h2>Recordings</h2>
 <p class="note">Replays of recorded streams. Deleting here is for the host who recorded it — the admin panel can remove any recording.</p>
@@ -111,5 +126,37 @@ async function addProduct() {
   await api('/api/products', { method: 'POST', body: JSON.stringify({ name, price, stock }) });
   $('#pName').value = ''; $('#pPrice').value = ''; $('#pStock').value = ''; toast('Product listed', 'ok'); load();
 }
+async function submitDispute() {
+  const orderId = parseInt($('#dOrder').value, 10);
+  if (!orderId) { $('#dMsg').textContent = 'Enter your order number first.'; return; }
+  try {
+    const d = await api('/api/disputes', { method: 'POST', body: JSON.stringify({ order_id: orderId, reason: $('#dReason').value, note: $('#dNote').value.trim() }) });
+    $('#dMsg').innerHTML = `<span class="ok">Report #${d.id} sent — the site owner will review it.</span>`;
+    $('#dOrder').value = ''; $('#dNote').value = '';
+    toast('Problem reported', 'ok');
+  } catch (e) { $('#dMsg').textContent = 'Could not send report: ' + e.message; toast(e.message || 'Report failed', 'err'); }
+}
+let reportProductId = null;
+async function openReport(productId) {
+  let p = null;
+  try { p = await api('/api/products').then(ps => ps.find(x => x.id === productId)); } catch (e) {}
+  reportProductId = productId;
+  $('#reportItem').textContent = p ? `${p.name} — $${Number(p.price).toFixed(2)}` : 'Listing #' + productId;
+  $('#repNote').value = ''; $('#repMsg').textContent = '';
+  $('#reportModal').style.display = 'flex';
+}
+function closeReport() { $('#reportModal').style.display = 'none'; reportProductId = null; }
+async function submitReport() {
+  if (!reportProductId) return;
+  try {
+    await api('/api/listing-reports', { method: 'POST', body: JSON.stringify({ product_id: reportProductId, reason: $('#repReason').value, note: $('#repNote').value.trim() }) });
+    $('#repMsg').innerHTML = '<span class="ok">Report sent — the site owner reviews flagged listings.</span>';
+    toast('Listing reported', 'ok');
+    setTimeout(closeReport, 900);
+  } catch (e) { $('#repMsg').textContent = 'Could not send report: ' + e.message; toast(e.message || 'Report failed', 'err'); }
+}
+// Deep link from the Discover feed's Report button on an unpinned listing.
+const _reportId = Number(new URLSearchParams(location.search).get('report'));
+if (_reportId) setTimeout(() => openReport(_reportId), 600);
 load();
 </script></body></html>

@@ -74,14 +74,14 @@
       <input id="pPrice" type="number" min="0.01" step="0.01" placeholder="Price ($)">
       <input id="pStock" type="number" min="0" step="1" placeholder="Stock">
       <button class="small" onclick="addProduct()">Add product (pinned to this stream)</button>
-      <label class="ack"><input type="checkbox" id="ackSeller"> I agree to the <a href="/sales-policy.html" target="_blank">Seller &amp; Sales Policy</a> — no real money is charged through this site yet.</label>
+      <label class="ack" id="sellerAckLabel"><input type="checkbox" id="ackSeller"> I agree to the <a href="/sales-policy.html" target="_blank">Seller &amp; Sales Policy</a> — no real money is charged through this site yet.</label>
     </div>
   </div>
 </div>
 </main>
 <footer>
 <p><a href="/terms.html">Terms of Service</a> · <a href="/privacy.html">Privacy Policy</a> · <a href="/sales-policy.html">Seller &amp; Sales Policy</a></p>
-<p>18+ only · No real payments yet — orders record the payment method chosen, no money is charged.</p>
+<p id="footerPayNote">18+ only · No real payments yet — orders record the payment method chosen, no money is charged.</p>
 </footer>
 <script src="/app.js"></script>
 <script>
@@ -352,4 +352,12 @@ $('#endBtn').onclick = async () => {
     btn.disabled = false;
   }
 };
+
+// Card checkout (Stripe) changes the seller-terms wording here too.
+api('/api/checkout/config').then(c => {
+  if (c && c.stripe_enabled) {
+    const sa = $('#sellerAckLabel');
+    if (sa) sa.innerHTML = `<input type="checkbox" id="ackSeller"> I agree to the <a href="/sales-policy.html" target="_blank">Seller &amp; Sales Policy</a> — payments are processed securely by Stripe.`;
+  }
+}).catch(() => {});
 </script></body></html>

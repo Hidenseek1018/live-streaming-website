@@ -174,6 +174,19 @@ async function checkAgeGate() {
 }
 checkAgeGate();
 
+// ---- Footer payment note ----
+// Pages with their own checkout copy (room, dashboard) update this inline;
+// this shared pass covers the rest (Discover, Studio, admin, replay, legal
+// pages) so no page keeps saying "no real payments" once Stripe is on.
+(function syncFooterPayNote() {
+  const el = document.getElementById('footerPayNote');
+  if (!el) return;
+  fetch('/api/checkout/config')
+    .then((r) => r.json())
+    .then((c) => { if (c && c.stripe_enabled) el.textContent = '18+ only · Secure card payments by Stripe.'; })
+    .catch(() => {});
+})();
+
 // ---- Stripe Checkout return ----
 // After the buyer returns from Stripe's hosted checkout, confirm the
 // payment server-side (the server re-checks the session with Stripe;

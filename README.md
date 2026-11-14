@@ -103,9 +103,20 @@ Hosts can record a live from the Studio and viewers can watch it back later:
 - **Live streams:** end a stream or remove it (with its chat history).
 - **Chat moderation:** latest messages across all streams, delete any message.
 - **Products:** list all listings, remove any listing.
-- **Orders:** list all orders, mark one cancelled or refunded. This only
-  changes the order's record — no money moves anywhere in this app, and stock
-  is not restored.
+- **Orders:** list all orders, mark one cancelled or refunded (record only —
+  no money moves), or **Refund via Stripe** on a paid card order: the server
+  looks up the Checkout Session, refunds the payment through Stripe, and only
+  then marks the order refunded and restores the stock. If Stripe refuses,
+  nothing changes. The button only appears for paid Stripe orders, and only
+  when card checkout is switched on.
+- **Buyer problem reports:** buyers report a problem with an order (order
+  number + what went wrong); the admin panel lists open reports with the
+  linked order and can mark each one resolved. Resolving never refunds by
+  itself — the Stripe refund is a separate, deliberate step.
+- **Listing reports:** visitors flag listings as misleading, prohibited, or a
+  scam. The Products table shows a report count per listing and the Channels
+  table shows a count per channel, so repeat offenders are visible next to
+  the block controls.
 - **Channels:** list channels with stream counts, block a channel (any of its
   live streams end immediately, and it gets a 403 if it tries to go live
   again) or unblock it. Orders carry a `status` (`placed` / `cancelled` /
@@ -241,13 +252,16 @@ Three plain-language legal pages, linked in the footer of every page:
   for saved methods), what is not (no IPs, no trackers, no ads, nothing
   sold), and how to reset it.
 - **Seller &amp; Sales Policy** (`/sales-policy.html`) — how sales work,
-  seller responsibilities, disputes, and listing removal.
+  card payments via Stripe, refunds through Stripe for paid orders, buyer
+  problem reports, listing reports, seller responsibilities, disputes, and
+  listing removal.
 
-**Honesty built in:** all three pages — and the footer on every page —
-say plainly that checkout does **not** charge real money: orders only
-record the payment method chosen, and the site provides no buyer
-protection, escrow, or refunds. Each page also notes the terms are
-standard terms, not legal advice, and should be reviewed by a lawyer
+**Honesty built in:** all three pages describe what the site actually does —
+card payments go through Stripe when switched on (test mode until live
+payments are enabled), a paid card order can be refunded back to the original
+card, and buyers can report problems. The site provides no escrow and no
+buyer protection beyond that refund process. Each page also notes the terms
+are standard terms, not legal advice, and should be reviewed by a lawyer
 before real money moves through the site.
 
 **Acknowledgments:** at checkout, the buyer must tick a box agreeing to
@@ -256,6 +270,46 @@ before the order can be placed. Anyone listing a product (Studio, room,
 or Dashboard) must tick a seller-terms box first. The boxes are
 client-side checks on the existing forms — the server still enforces the
 age gate on every protected action.
+
+## Trust & safety: refunds and problem reports
+
+Keeping sellers honest, and giving buyers a way back when a sale goes wrong:
+
+- **Real Stripe refunds (admin only):** on any paid card order, the admin
+  panel shows **Refund via Stripe**. The server retrieves the Checkout
+  Session from Stripe, takes its payment intent, and creates a full refund
+  through Stripe (`POST /v1/refunds`). Only after Stripe confirms the refund
+  does the server mark the order `refunded` (and `payment_status`
+  `refunded`), record the Stripe refund id, and restore the product stock
+  by 1. If Stripe refuses or cannot be reached, nothing changes — the order
+  stays paid and the stock stays put. The record-only Cancel/Refund buttons
+  stay for record-only orders; they never move money. The Stripe button
+  appears only for paid Stripe orders, and only when `STRIPE_SECRET_KEY`
+  is set.
+- **Buyer problem reports:** a buyer with an order number can report a
+  problem from the stream room or the Dashboard (not as described, never
+  arrived, damaged, or something else, plus an optional note). Reports land
+  in the `disputes` table and show in the admin panel with the linked order;
+  admin can mark a report resolved. Resolving a report never refunds by
+  itself — the refund is a separate, deliberate step.
+- **Listing reports:** any visitor can flag a listing (misleading,
+  prohibited, scam, or other) from the room page or a shop card on
+  Discover. Reports are counted per listing and per channel in the admin
+  panel, next to the block/unblock controls, so a channel with repeat
+  reports is obvious at a glance. Blocking a channel ends its live streams
+  immediately and bars it from going live again.
+- **Honest limits:**
+  - Refunds only work for orders actually paid through Stripe. Record-only
+    orders have no payment to refund.
+  - There is no escrow and no automatic payout hold — money goes to the
+    site's Stripe account at checkout, and a refund comes out of that
+    account. Sellers are not paid out automatically (Stripe Connect is a
+    separate, later step).
+  - Reports rely on buyers speaking up — the site cannot detect a bad sale
+    on its own, and it cannot force a seller to deliver or a buyer to pay.
+  - Full refunds only in v1 (no partial refunds), and no webhook: a refund
+    made in the Stripe Dashboard is not reflected on the site unless the
+    admin also marks the order refunded here.
 
 ## Deploy — Fly.io (free allowance)
 
@@ -297,6 +351,8 @@ before relying on it being $0.
 | `GET /api/checkout/config` | Whether card checkout (Stripe) is switched on |
 | `POST /api/checkout` `{product_id, stream_id, buyer}` | Create a Stripe Checkout Session; returns the Stripe payment URL (age-gated) |
 | `GET /api/checkout/confirm?session_id=` | Retrieve the session from Stripe; marks the order paid only when Stripe says it is paid (age-gated) |
+| `POST /api/disputes` `{order_id, reason, note}` | Report a problem with an order (age-gated) |
+| `POST /api/listing-reports` `{product_id, reason, note}` | Flag a listing as misleading, prohibited, scam, or other (age-gated) |
 | `GET/POST /api/payment-methods` · `POST /api/payment-methods/:id/default` · `DELETE /api/payment-methods/:id` | Saved methods (label + last-4/handle only) |
 | `GET/POST/DELETE /api/follows` | Follow channels |
 | `POST/GET /api/signals` | WebRTC signaling (join/offer/answer/ice, addressed delivery) |
@@ -310,6 +366,9 @@ before relying on it being $0.
 | `GET /api/admin/chat` · `DELETE /api/admin/chat/:id` | Admin: recent chat, delete message |
 | `GET /api/admin/products` · `DELETE /api/admin/products/:id` | Admin: listings, remove listing |
 | `GET /api/admin/orders` · `POST /api/admin/orders/:id/status` `{status}` | Admin: orders, mark placed/cancelled/refunded |
+| `POST /api/admin/orders/:id/refund` | Admin: refund a paid Stripe order through Stripe (money back to the card, stock restored) |
+| `GET /api/admin/disputes` · `POST /api/admin/disputes/:id/resolve` | Admin: buyer problem reports, mark one resolved |
+| `GET /api/admin/listing-reports` | Admin: recent listing reports with product and channel |
 | `GET /api/admin/recordings` · `DELETE /api/admin/recordings/:id` | Admin: list recordings, delete one (file included) |
 | `GET /api/admin/channels` · `POST /api/admin/channels/block` · `POST /api/admin/channels/unblock` | Admin: channels, block/unblock |
 
@@ -350,10 +409,12 @@ hosted Checkout instead of the record-only flow:
   above. If a buyer pays but closes the tab before returning, the order stays
   `unpaid` until someone opens the return link — a Stripe webhook endpoint
   would close that gap and is the next improvement.
-- **Admin cancel/refund is record-only:** marking an order cancelled/refunded
-  in the admin panel changes the record only — it does not refund the buyer
-  through Stripe. Real refunds are done in the Stripe Dashboard (or a future
-  refund endpoint).
+- **Refunds:** a paid card order can be refunded from the admin panel — the
+  server creates the refund through Stripe (`POST /v1/refunds` with the
+  session's payment intent) and only marks the order refunded after Stripe
+  confirms it, restoring the stock. Record-only Cancel/Refund in the admin
+  panel still only changes the record and never moves money. See "Trust &
+  safety" above.
 - The server talks to Stripe with raw `node:https` calls (no Stripe SDK, zero
   new dependencies). The secret key is never logged. `STRIPE_API_BASE` is a
   test-only override that lets a local stub stand in for `api.stripe.com`

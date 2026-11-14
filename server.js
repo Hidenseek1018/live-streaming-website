@@ -123,6 +123,27 @@ CREATE TABLE IF NOT EXISTS recordings (
   duration_seconds INTEGER,
   created_at INTEGER NOT NULL
 );
+-- Buyer problem reports (disputes): a buyer files one against an order.
+-- status is 'open' or 'resolved'. Resolving a dispute does NOT refund —
+-- the refund is a separate, deliberate admin step (see Stripe refund).
+CREATE TABLE IF NOT EXISTS disputes (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  order_id INTEGER NOT NULL,
+  reason TEXT NOT NULL,
+  note TEXT NOT NULL DEFAULT '',
+  status TEXT NOT NULL DEFAULT 'open',
+  created_at INTEGER NOT NULL
+);
+-- Listing reports: a visitor flags a product listing as misleading,
+-- prohibited, a scam, or other. Counted per product and per channel in
+-- the admin panel so repeat offenders are visible at a glance.
+CREATE TABLE IF NOT EXISTS listing_reports (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  product_id INTEGER NOT NULL,
+  reason TEXT NOT NULL,
+  note TEXT NOT NULL DEFAULT '',
+  created_at INTEGER NOT NULL
+);
 -- Visitor analytics (simple, first-party only — no third-party service).
 -- visitors: one row per random visitor cookie (no raw IPs stored anywhere).
 -- page_views: one row per HTML page load.
@@ -162,6 +183,14 @@ try {
     db.exec('ALTER TABLE orders ADD COLUMN payment_status TEXT DEFAULT NULL');
   }
 } catch { /* columns already present */ }
+
+// Migration: orders.stripe_refund_id (audit trail for real Stripe refunds)
+try {
+  const cols = db.prepare('PRAGMA table_info(orders)').all();
+  if (!cols.some((c) => c.name === 'stripe_refund_id')) {
+    db.exec('ALTER TABLE orders ADD COLUMN stripe_refund_id TEXT DEFAULT NULL');
+  }
+} catch { /* column already present */ }
 
 const now = () => Date.now();
 const STALE_MS = 90_000; // signals older than this are ignored
@@ -436,10 +465,13 @@ const server = http.createServer(async (req, res) => {
         const revenue = db.prepare("SELECT COALESCE(SUM(amount),0) s FROM orders WHERE status='placed'").get().s;
         const viewers = db.prepare('SELECT COUNT(*) c FROM viewers WHERE last_seen>?').get(now() - VIEWER_TTL_MS).c;
         const recordings = db.prepare('SELECT COUNT(*) c FROM recordings').get().c;
+        const openDisputes = db.prepare("SELECT COUNT(*) c FROM disputes WHERE status='open'").get().c;
+        const listingReports = db.prepare('SELECT COUNT(*) c FROM listing_reports').get().c;
         return sendJson(res, 200, {
           live_streams: live, total_streams: totalStreams, channels, blocked_channels: blocked,
           products: listings, orders, cancelled_orders: cancelled, revenue: Number(revenue), viewers,
-          recordings,
+          recordings, stripe_enabled: stripeEnabled(),
+          open_disputes: openDisputes, listing_reports: listingReports,
           ...analyticsSummary(),
         });
       }
@@ -486,9 +518,11 @@ const server = http.createServer(async (req, res) => {
         return sendJson(res, 200, { ok: true });
       }
 
-      // Products: list / remove
+      // Products: list / remove (with how many times each listing was reported)
       if (p === '/api/admin/products' && req.method === 'GET') {
-        return sendJson(res, 200, db.prepare('SELECT * FROM products ORDER BY created_at DESC').all());
+        return sendJson(res, 200, db.prepare(
+          'SELECT *, (SELECT COUNT(*) FROM listing_reports WHERE product_id=products.id) AS report_count FROM products ORDER BY created_at DESC'
+        ).all());
       }
       const adminDelProduct = p.match(/^\/api\/admin\/products\/(\d+)$/);
       if (adminDelProduct && req.method === 'DELETE') {
@@ -516,15 +550,90 @@ const server = http.createServer(async (req, res) => {
         return sendJson(res, 200, db.prepare('SELECT * FROM orders WHERE id=?').get(o.id));
       }
 
+      // Real Stripe refund: returns the buyer's money to their original
+      // card. Only for orders Stripe actually charged (payment_status
+      // 'paid' with a stored session). Full refunds only in v1.
+      // The refund is only recorded locally AFTER Stripe confirms it —
+      // if Stripe errors, nothing changes (order stays paid, stock stays).
+      const adminRefund = p.match(/^\/api\/admin\/orders\/(\d+)\/refund$/);
+      if (adminRefund && req.method === 'POST') {
+        if (!stripeEnabled()) return sendJson(res, 503, { error: 'Card refunds are not set up yet.', stripe_enabled: false });
+        const o = db.prepare('SELECT * FROM orders WHERE id=?').get(adminRefund[1]);
+        if (!o) return sendJson(res, 404, { error: 'order not found' });
+        if (o.status !== 'placed' || o.payment_status !== 'paid' || !o.stripe_session_id) {
+          return sendJson(res, 400, { error: 'Only a paid Stripe order can be refunded through Stripe.' });
+        }
+        let session;
+        try {
+          session = await stripeRequest('GET', '/v1/checkout/sessions/' + encodeURIComponent(o.stripe_session_id));
+        } catch (e) {
+          return sendJson(res, 502, { error: 'Could not look up the payment with Stripe: ' + e.message });
+        }
+        const pi = session && (typeof session.payment_intent === 'string' ? session.payment_intent : session.payment_intent && session.payment_intent.id);
+        if (!pi) return sendJson(res, 502, { error: 'Stripe has no payment for this order — nothing was refunded.' });
+        let refund;
+        try {
+          refund = await stripeRequest('POST', '/v1/refunds', { payment_intent: pi });
+        } catch (e) {
+          return sendJson(res, 502, { error: 'Stripe refused the refund: ' + e.message });
+        }
+        if (!refund || !refund.id || !['succeeded', 'pending'].includes(refund.status)) {
+          return sendJson(res, 502, { error: 'Stripe did not confirm the refund — nothing was changed.' });
+        }
+        db.exec('BEGIN IMMEDIATE');
+        try {
+          db.prepare("UPDATE orders SET status='refunded', payment_status='refunded', stripe_refund_id=? WHERE id=?").run(refund.id, o.id);
+          db.prepare('UPDATE products SET stock = stock + 1 WHERE id=?').run(o.product_id);
+          db.exec('COMMIT');
+        } catch (e) { db.exec('ROLLBACK'); throw e; }
+        const updated = db.prepare('SELECT * FROM orders WHERE id=?').get(o.id);
+        return sendJson(res, 200, { ...updated, refund_id: refund.id, refund_status: refund.status });
+      }
+
+      // Buyer problem reports (disputes): list / mark resolved. Resolving
+      // is admin bookkeeping only — it never refunds by itself.
+      if (p === '/api/admin/disputes' && req.method === 'GET') {
+        const rows = db.prepare(
+          `SELECT d.*, o.buyer, o.amount, o.payment_method, o.payment_status, o.status AS order_status,
+                  pr.name AS product_name
+           FROM disputes d LEFT JOIN orders o ON o.id=d.order_id
+           LEFT JOIN products pr ON pr.id=o.product_id
+           ORDER BY d.created_at DESC LIMIT 200`
+        ).all();
+        return sendJson(res, 200, rows);
+      }
+      const adminResolveDispute = p.match(/^\/api\/admin\/disputes\/(\d+)\/resolve$/);
+      if (adminResolveDispute && req.method === 'POST') {
+        const d = db.prepare('SELECT * FROM disputes WHERE id=?').get(adminResolveDispute[1]);
+        if (!d) return sendJson(res, 404, { error: 'report not found' });
+        db.prepare("UPDATE disputes SET status='resolved' WHERE id=?").run(d.id);
+        return sendJson(res, 200, db.prepare('SELECT * FROM disputes WHERE id=?').get(d.id));
+      }
+
+      // Listing reports: recent reports with the product and channel.
+      if (p === '/api/admin/listing-reports' && req.method === 'GET') {
+        const rows = db.prepare(
+          `SELECT lr.*, pr.name AS product_name, s.channel_name
+           FROM listing_reports lr LEFT JOIN products pr ON pr.id=lr.product_id
+           LEFT JOIN streams s ON s.id=pr.stream_id
+           ORDER BY lr.created_at DESC LIMIT 200`
+        ).all();
+        return sendJson(res, 200, rows);
+      }
+
       // Channels: list / block / unblock (blocking ends their live streams at once)
       if (p === '/api/admin/channels' && req.method === 'GET') {
         const rows = db.prepare(
           `SELECT channel_name, COUNT(*) AS streams, SUM(CASE WHEN status='live' THEN 1 ELSE 0 END) AS live_streams,
-           EXISTS(SELECT 1 FROM blocked_channels bc WHERE LOWER(bc.channel)=LOWER(streams.channel_name)) AS blocked
+           EXISTS(SELECT 1 FROM blocked_channels bc WHERE LOWER(bc.channel)=LOWER(streams.channel_name)) AS blocked,
+           (SELECT COUNT(*) FROM listing_reports lr
+              JOIN products pr ON pr.id=lr.product_id
+              JOIN streams s2 ON s2.id=pr.stream_id
+              WHERE LOWER(s2.channel_name)=LOWER(streams.channel_name)) AS report_count
            FROM streams GROUP BY channel_name ORDER BY streams DESC`
         ).all();
         const blockedOnly = db.prepare(
-          `SELECT channel AS channel_name, 0 AS streams, 0 AS live_streams, 1 AS blocked FROM blocked_channels
+          `SELECT channel AS channel_name, 0 AS streams, 0 AS live_streams, 1 AS blocked, 0 AS report_count FROM blocked_channels
            WHERE LOWER(channel) NOT IN (SELECT LOWER(channel_name) FROM streams)`
         ).all();
         return sendJson(res, 200, [...rows, ...blockedOnly]);
@@ -821,6 +930,43 @@ const server = http.createServer(async (req, res) => {
       }
       const updated = db.prepare('SELECT * FROM orders WHERE id=?').get(order.id);
       return sendJson(res, 200, { paid, payment_status: session.payment_status || 'unknown', order: updated });
+    }
+
+    // Buyer problem reports (disputes): a buyer flags something wrong
+    // with an order. No accounts — the order number is the link. Filing a
+    // report never refunds by itself; the admin decides that separately.
+    const DISPUTE_REASONS = ['not_as_described', 'never_arrived', 'damaged', 'other'];
+    if (p === '/api/disputes' && req.method === 'POST') {
+      if (!requireAge(req, res)) return;
+      const b = await readBody(req);
+      const orderId = Number(b.order_id);
+      if (!Number.isInteger(orderId) || orderId <= 0) return sendJson(res, 400, { error: 'order_id is required' });
+      if (!DISPUTE_REASONS.includes(b.reason)) {
+        return sendJson(res, 400, { error: 'reason must be not_as_described, never_arrived, damaged or other' });
+      }
+      const order = db.prepare('SELECT * FROM orders WHERE id=?').get(orderId);
+      if (!order) return sendJson(res, 404, { error: 'order not found — check the order number' });
+      const r = db.prepare('INSERT INTO disputes (order_id, reason, note, status, created_at) VALUES (?,?,?,?,?)')
+        .run(orderId, b.reason, esc(b.note).slice(0, 500), 'open', now());
+      return sendJson(res, 201, db.prepare('SELECT * FROM disputes WHERE id=?').get(r.lastInsertRowid));
+    }
+
+    // Listing reports: a visitor flags a product listing. Kept separate
+    // from order disputes — this is about the listing, not a purchase.
+    const LISTING_REASONS = ['misleading', 'prohibited', 'scam', 'other'];
+    if (p === '/api/listing-reports' && req.method === 'POST') {
+      if (!requireAge(req, res)) return;
+      const b = await readBody(req);
+      const productId = Number(b.product_id);
+      if (!Number.isInteger(productId) || productId <= 0) return sendJson(res, 400, { error: 'product_id is required' });
+      if (!LISTING_REASONS.includes(b.reason)) {
+        return sendJson(res, 400, { error: 'reason must be misleading, prohibited, scam or other' });
+      }
+      const product = db.prepare('SELECT * FROM products WHERE id=?').get(productId);
+      if (!product) return sendJson(res, 404, { error: 'product not found' });
+      const r = db.prepare('INSERT INTO listing_reports (product_id, reason, note, created_at) VALUES (?,?,?,?)')
+        .run(productId, b.reason, esc(b.note).slice(0, 500), now());
+      return sendJson(res, 201, db.prepare('SELECT * FROM listing_reports WHERE id=?').get(r.lastInsertRowid));
     }
 
     // Payment methods (store label + last-4/handle only — never full numbers)
