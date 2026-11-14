@@ -225,6 +225,27 @@ try {
   }
 } catch { /* column already present */ }
 
+// Repair: spots stranded by an abandoned checkout before spots were linked
+// to their order at checkout time. Starting checkout takes the spot's stock,
+// but the spot was only linked once payment confirmed — so a checkout that
+// was never completed (then cancelled) left an 'available' spot with stock 0
+// and no order pointing at it, unbuyable forever. Restore stock for those
+// spots, but never for one with an open (placed + unpaid) order still holding
+// it — that buyer may still be on Stripe paying.
+try {
+  db.prepare(`
+    UPDATE products SET stock = 1 WHERE id IN (
+      SELECT bs.product_id FROM break_spots bs
+      JOIN products pr ON pr.id = bs.product_id
+      WHERE bs.status = 'available' AND pr.stock = 0
+      AND NOT EXISTS (
+        SELECT 1 FROM orders o
+        WHERE o.product_id = bs.product_id
+        AND o.status = 'placed' AND o.payment_status = 'unpaid'
+      )
+    )`).run();
+} catch { /* repair is best-effort; a stranded spot stays visible in admin */ }
+
 const now = () => Date.now();
 const STALE_MS = 90_000; // signals older than this are ignored
 const VIEWER_TTL_MS = 30_000;
@@ -1178,6 +1199,10 @@ const server = http.createServer(async (req, res) => {
         const r = db.prepare('INSERT INTO orders (product_id, stream_id, buyer, payment_method, amount, stripe_session_id, payment_status, created_at) VALUES (?,?,?,?,?,?,?,?)')
           .run(product.id, streamId || null, esc(b.buyer) || 'Anonymous', 'Stripe', product.price, session.id, 'unpaid', now());
         order = db.prepare('SELECT * FROM orders WHERE id=?').get(r.lastInsertRowid);
+        // Link a break spot to its order while the checkout is open, so an
+        // abandoned checkout can still be freed (cancel/refund) later — the
+        // spot only becomes 'sold' once payment confirms.
+        db.prepare("UPDATE break_spots SET order_id=? WHERE product_id=? AND status='available'").run(order.id, product.id);
         db.exec('COMMIT');
       } catch (e) { db.exec('ROLLBACK'); throw e; }
       return sendJson(res, 201, { url: session.url, session_id: session.id, order_id: order.id });
