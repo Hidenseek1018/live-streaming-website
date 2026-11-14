@@ -1,0 +1,104 @@
+<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Admin — LiveStream</title><link rel="stylesheet" href="/style.css"></head><body>
+<header><div class="logo">Live<span>Stream</span></div><nav>
+<a href="/">Discover</a><a href="/studio.html">Studio</a><a href="/dashboard.html">Dashboard</a><a href="/admin.html">Admin</a>
+</nav></header>
+<main>
+<h1>Site admin</h1>
+<p class="note">Moderate streams, chat, products, orders and channels. Cancelling or refunding an order only changes its record — no money moves anywhere in this app.</p>
+
+<div class="card" id="gate">
+<h2>Enter admin passcode</h2>
+<p class="note">Set with the <code>ADMIN_CODE</code> environment variable on the server. If it isn't set, the admin panel stays locked — there is no default passcode.</p>
+<div class="row"><input id="code" type="password" placeholder="Admin passcode" style="flex:2" autocomplete="off">
+<button onclick="unlock()">Unlock</button></div>
+<p id="gateMsg" class="warn"></p>
+</div>
+
+<div id="panel" style="display:none">
+<div class="row"><button class="small" onclick="loadAll()">Refresh</button>
+<button class="small secondary" onclick="lock()">Lock</button></div>
+<div class="stat-grid" id="stats"></div>
+
+<div class="card"><h2>Visitor analytics</h2>
+<p class="note">First-party counts only — page views and unique visitors by random cookie, no IP addresses stored.</p>
+<div id="analytics"></div></div>
+
+<div class="card"><h2>Live streams</h2><div id="live"></div></div>
+<div class="card"><h2>Recent chat (all streams)</h2><div id="chat"></div></div>
+<div class="card"><h2>Products</h2><div id="products"></div></div>
+<div class="card"><h2>Orders</h2><div id="orders"></div></div>
+<div class="card"><h2>Channels</h2><div id="channels"></div></div>
+</div>
+</main>
+<script src="/app.js"></script>
+<script>
+let CODE = sessionStorage.getItem('admin_code') || '';
+function headers() { return { 'Content-Type': 'application/json', 'x-admin-code': CODE }; }
+async function aapi(path, opts) {
+  const r = await fetch(path, { headers: headers(), ...opts });
+  const d = await r.json().catch(() => ({}));
+  if (!r.ok) throw new Error(d.error || ('HTTP ' + r.status));
+  return d;
+}
+async function unlock() {
+  CODE = $('#code').value.trim();
+  if (!CODE) { $('#gateMsg').textContent = 'Enter the passcode first.'; return; }
+  try {
+    await aapi('/api/admin/auth');
+    sessionStorage.setItem('admin_code', CODE);
+    $('#gate').style.display = 'none';
+    $('#panel').style.display = 'block';
+    $('#gateMsg').textContent = '';
+    loadAll();
+  } catch (e) {
+    $('#gateMsg').textContent = e.message === 'admin is not configured'
+      ? 'Admin is not set up on this server (no ADMIN_CODE).'
+      : 'Wrong passcode.';
+  }
+}
+function lock() {
+  CODE = ''; sessionStorage.removeItem('admin_code');
+  $('#panel').style.display = 'none'; $('#gate').style.display = 'block'; $('#code').value = '';
+}
+async function loadAll() {
+  try {
+    const s = await aapi('/api/admin/stats');
+    $('#stats').innerHTML = [
+      ['Live streams', s.live_streams], ['Total streams', s.total_streams], ['Channels', s.channels],
+      ['Blocked channels', s.blocked_channels], ['Viewers now', s.viewers], ['Products', s.products],
+      ['Orders', s.orders], ['Cancelled / refunded', s.cancelled_orders],
+      ['Revenue (active orders)', '$' + Number(s.revenue).toFixed(2)],
+      ['Total visits', s.total_visits], ['Unique visitors', s.unique_visitors], ['Visits today', s.visits_today],
+    ].map(([k, v]) => `<div class="stat"><b>${v}</b><span>${k}</span></div>`).join('');
+
+    $('#analytics').innerHTML =
+      `<h3>Views per page</h3>` + (s.per_page.length ? `<table><tr><th>Page</th><th>Views</th></tr>${s.per_page.map(r => `<tr><td>${esc(r.path)}</td><td>${r.views}</td></tr>`).join('')}</table>` : '<p class="note">No visits yet.</p>') +
+      `<h3>Visits per day (last 30 days)</h3>` + (s.per_day.length ? `<table><tr><th>Day</th><th>Visits</th></tr>${s.per_day.map(r => `<tr><td>${esc(r.day)}</td><td>${r.views}</td></tr>`).join('')}</table>` : '<p class="note">No visits yet.</p>');
+
+    const live = await aapi('/api/admin/streams?status=live');
+    $('#live').innerHTML = live.length ? `<table><tr><th>Stream</th><th>Channel</th><th>Viewers</th><th>Started</th><th></th></tr>${live.map(x => `<tr><td>${esc(x.title)}</td><td>${esc(x.channel_name)}</td><td>${x.viewer_count}</td><td>${new Date(x.created_at).toLocaleString()}</td><td><a href="/room.html?id=${x.id}">View</a> <button class="small secondary" onclick="endStream(${x.id})">End</button> <button class="small secondary" onclick="delStream(${x.id})">Remove</button></td></tr>`).join('')}</table>` : '<p class="note">No live streams right now.</p>';
+
+    const chat = await aapi('/api/admin/chat?limit=100');
+    $('#chat').innerHTML = chat.length ? `<table><tr><th>Message</th><th>Author</th><th>Stream</th><th>When</th><th></th></tr>${chat.map(m => `<tr><td>${esc(m.text)}</td><td>${esc(m.author)}</td><td>${esc(m.stream_title || ('#' + m.stream_id))} — ${esc(m.channel_name || '')}</td><td>${new Date(m.created_at).toLocaleString()}</td><td><button class="small secondary" onclick="delChat(${m.id})">Delete</button></td></tr>`).join('')}</table>` : '<p class="note">No chat messages yet.</p>';
+
+    const prods = await aapi('/api/admin/products');
+    $('#products').innerHTML = prods.length ? `<table><tr><th>Product</th><th>Price</th><th>Stock</th><th>Pinned stream</th><th></th></tr>${prods.map(p => `<tr><td>${esc(p.name)}</td><td>$${Number(p.price).toFixed(2)}</td><td>${p.stock}</td><td>${p.stream_id ? 'Stream #' + p.stream_id : '—'}</td><td><button class="small secondary" onclick="delProduct(${p.id})">Remove</button></td></tr>`).join('')}</table>` : '<p class="note">No listings yet.</p>';
+
+    const orders = await aapi('/api/admin/orders');
+    $('#orders').innerHTML = orders.length ? `<table><tr><th>Order</th><th>Product</th><th>Buyer</th><th>Amount</th><th>Method</th><th>Status</th><th>When</th><th></th></tr>${orders.map(o => `<tr><td>#${o.id}</td><td>${esc(o.product_name || '')}</td><td>${esc(o.buyer)}</td><td>$${Number(o.amount).toFixed(2)}</td><td>${esc(o.payment_method)}</td><td>${esc(o.status || 'placed')}</td><td>${new Date(o.created_at).toLocaleString()}</td><td>${o.status === 'placed' ? `<button class="small secondary" onclick="setOrder(${o.id},'cancelled')">Cancel</button> <button class="small secondary" onclick="setOrder(${o.id},'refunded')">Refund</button>` : ''}</td></tr>`).join('')}</table>` : '<p class="note">No orders yet.</p>';
+
+    const chans = await aapi('/api/admin/channels');
+    $('#channels').innerHTML = chans.length ? `<table><tr><th>Channel</th><th>Streams</th><th>Live</th><th>Status</th><th></th></tr>${chans.map(c => `<tr><td>${esc(c.channel_name)}</td><td>${c.streams}</td><td>${c.live_streams}</td><td>${c.blocked ? '<span class="warn">Blocked</span>' : '<span class="ok">Active</span>'}</td><td>${c.blocked ? `<button class="small secondary" onclick="unblock('${esc(c.channel_name)}')">Unblock</button>` : `<button class="small secondary" onclick="block('${esc(c.channel_name)}')">Block</button>`}</td></tr>`).join('')}</table>` : '<p class="note">No channels yet.</p>';
+  } catch (e) { lock(); $('#gateMsg').textContent = 'Session ended: ' + e.message; }
+}
+async function endStream(id) { if (confirm('End this stream?')) { await aapi(`/api/admin/streams/${id}/end`, { method: 'POST' }); loadAll(); } }
+async function delStream(id) { if (confirm('Remove this stream and its chat history?')) { await aapi(`/api/admin/streams/${id}`, { method: 'DELETE' }); loadAll(); } }
+async function delChat(id) { await aapi(`/api/admin/chat/${id}`, { method: 'DELETE' }); loadAll(); }
+async function delProduct(id) { if (confirm('Remove this listing?')) { await aapi(`/api/admin/products/${id}`, { method: 'DELETE' }); loadAll(); } }
+async function setOrder(id, status) { if (confirm(`Mark order #${id} as ${status}? This only changes the record — no money moves.`)) { await aapi(`/api/admin/orders/${id}/status`, { method: 'POST', body: JSON.stringify({ status }) }); loadAll(); } }
+async function block(ch) { if (confirm(`Block ${ch} from going live? Any of their live streams end immediately.`)) { await aapi('/api/admin/channels/block', { method: 'POST', body: JSON.stringify({ channel: ch }) }); loadAll(); } }
+async function unblock(ch) { await aapi('/api/admin/channels/unblock', { method: 'POST', body: JSON.stringify({ channel: ch }) }); loadAll(); }
+$('#code').addEventListener('keydown', (e) => { if (e.key === 'Enter') unlock(); });
+if (CODE) { aapi('/api/admin/auth').then(() => { $('#gate').style.display = 'none'; $('#panel').style.display = 'block'; loadAll(); }).catch(() => { sessionStorage.removeItem('admin_code'); CODE = ''; }); }
+</script></body></html>

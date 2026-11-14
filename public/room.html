@@ -1,0 +1,146 @@
+<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Watch — LiveStream</title><link rel="stylesheet" href="/style.css"></head><body>
+<header><div class="logo">Live<span>Stream</span></div><nav>
+<a href="/">Discover</a><a href="/studio.html">Studio</a><a href="/dashboard.html">Dashboard</a><a href="/admin.html">Admin</a>
+</nav></header>
+<main>
+<div id="room"></div>
+<div class="card"><video id="remoteVideo" autoplay muted playsinline></video>
+<p id="videoState" class="warn">Connecting to host…</p>
+<div class="row"><button id="unmuteBtn" class="secondary">▶ Play with sound</button></div></div>
+
+<div class="row" style="align-items:flex-start">
+<div class="card" style="flex:2;min-width:280px"><h2>Live chat</h2><div id="chat"></div>
+<div class="row"><input id="chatInput" placeholder="Say something…" style="flex:1"><button class="small" onclick="sendChat()">Send</button></div></div>
+<div class="card" style="flex:1;min-width:260px"><h2>Shop this stream</h2><div id="products"></div>
+<h3 style="margin-top:16px">List your own product</h3>
+<input id="pName" placeholder="Product name"><input id="pPrice" type="number" min="0.01" step="0.01" placeholder="Price ($)">
+<input id="pStock" type="number" min="0" step="1" placeholder="Stock"><button class="small" onclick="addProduct()">List product</button></div>
+</div>
+
+<div id="checkoutModal" class="modal" style="display:none"><div class="box">
+<h3>Checkout</h3><p id="checkoutItem"></p>
+<label>Your name</label><input id="buyerName">
+<label>Payment method</label><div id="payChoices"></div>
+<p class="note">No real charging — this only records which payment method you chose. Saved methods are managed in the Dashboard.</p>
+<div class="row"><button id="confirmBuy">Buy now</button><button class="secondary" onclick="closeCheckout()">Cancel</button></div>
+<p id="buyMsg"></p>
+</div></div>
+</main>
+<script src="/app.js"></script>
+<script>
+const params = new URLSearchParams(location.search);
+const streamId = Number(params.get('id'));
+const myId = viewerId();
+let stream = null, pc = null, signalSince = 0, joinedAt = Date.now(), gotVideo = false, pollTimer, chatTimer, hbTimer;
+let selectedProduct = null, selectedMethod = null;
+
+async function init() {
+  if (!streamId) { $('#room').innerHTML = '<p>No stream selected. <a href="/">Back to Discover</a></p>'; return; }
+  stream = await api('/api/streams/' + streamId);
+  const followed = (await api('/api/follows')).some(f => f.channel === stream.channel_name);
+  $('#room').innerHTML = `<h1>${esc(stream.title)}</h1>
+    <p><span class="${stream.status === 'live' ? 'live-badge' : 'ended-badge'}">${stream.status === 'live' ? '● LIVE' : 'ENDED'}</span>
+    <b>${esc(stream.channel_name)}</b> · ${esc(stream.category)} ·
+    👁 <span id="vc">${stream.viewer_count}</span> watching</p>
+    <button id="followBtn" class="${followed ? 'secondary' : ''}">${followed ? '✓ Following' : '+ Follow'}</button>`;
+  $('#followBtn').onclick = async () => {
+    if ((await api('/api/follows')).some(f => f.channel === stream.channel_name)) {
+      await fetch('/api/follows?channel=' + encodeURIComponent(stream.channel_name), { method: 'DELETE' });
+      $('#followBtn').textContent = '+ Follow';
+    } else {
+      await api('/api/follows', { method: 'POST', body: JSON.stringify({ channel: stream.channel_name }) });
+      $('#followBtn').textContent = '✓ Following';
+    }
+  };
+  if (stream.status !== 'live') { $('#videoState').textContent = 'This stream has ended.'; loadChatProducts(); return; }
+  // Heartbeat (viewer count) + join signal
+  const beat = async () => { const r = await api(`/api/streams/${streamId}/heartbeat`, { method: 'POST', body: JSON.stringify({ peer_id: myId }) }); const vc = $('#vc'); if (vc) vc.textContent = r.viewer_count; };
+  await beat(); hbTimer = setInterval(beat, 10000);
+  await api('/api/signals', { method: 'POST', body: JSON.stringify({ stream_id: streamId, from_id: myId, to_id: 'host', type: 'join', payload: {} }) });
+  pollTimer = setInterval(pollSignals, 1500);
+  chatTimer = setInterval(loadChatProducts, 3000); loadChatProducts();
+  setTimeout(() => { if (!gotVideo) $('#videoState').textContent = "Couldn't establish a live video connection — the host's camera may be off, or the peer connection couldn't be established. Chat and shopping still work below."; }, 20000);
+}
+
+async function pollSignals() {
+  const sigs = await api(`/api/signals?streamId=${streamId}&peerId=${myId}&since=${signalSince}`);
+  for (const sig of sigs) {
+    signalSince = Math.max(signalSince, sig.id);
+    if (sig.type === 'offer') await handleOffer(sig.payload);
+    else if (sig.type === 'ice' && pc && sig.payload.candidate) await pc.addIceCandidate(sig.payload).catch(console.warn);
+  }
+}
+
+async function handleOffer(offer) {
+  if (pc) pc.close();
+  pc = new RTCPeerConnection({ iceServers: [{ urls: 'stun:stun.l.google.com:19302' }] });
+  pc.onicecandidate = (e) => { if (e.candidate) api('/api/signals', { method: 'POST', body: JSON.stringify({ stream_id: streamId, from_id: myId, to_id: 'host', type: 'ice', payload: e.candidate }) }); };
+  pc.ontrack = (e) => {
+    gotVideo = true;
+    $('#remoteVideo').srcObject = e.streams[0];
+    $('#videoState').textContent = '🔴 Live video from host (muted — use Play with sound for audio).';
+    $('#videoState').className = 'ok';
+  };
+  await pc.setRemoteDescription(offer);
+  const answer = await pc.createAnswer();
+  await pc.setLocalDescription(answer);
+  await api('/api/signals', { method: 'POST', body: JSON.stringify({ stream_id: streamId, from_id: myId, to_id: 'host', type: 'answer', payload: answer }) });
+}
+
+$('#unmuteBtn').onclick = async () => {
+  const v = $('#remoteVideo'); v.muted = false; v.volume = 1;
+  try { await v.play(); $('#videoState').textContent = '🔴 Live video from host with sound.'; } catch (e) { $('#videoState').textContent = 'Video is playing muted — tap again to enable sound.'; v.muted = true; }
+};
+
+async function loadChatProducts() {
+  const msgs = await api(`/api/streams/${streamId}/chat`);
+  $('#chat').innerHTML = msgs.map(m => `<p><b>${esc(m.author)}:</b> ${esc(m.text)}</p>`).join('') || '<p class="note">No chat yet — be the first to say hello.</p>';
+  const prods = await api(`/api/products?stream_id=${streamId}`);
+  const all = prods.length ? prods : await api('/api/products');
+  $('#products').innerHTML = (prods.length ? prods : all).map(p => `
+    <div class="row" style="justify-content:space-between;border-bottom:1px solid #2a2f3a;padding:8px 0">
+      <span><b>${esc(p.name)}</b><br>$${Number(p.price).toFixed(2)} · ${p.stock} in stock</span>
+      <button class="small" ${p.stock <= 0 ? 'disabled' : ''} onclick='openCheckout(${p.id})'>Buy</button>
+    </div>`).join('') || '<p class="note">Nothing for sale on this stream yet.</p>';
+  window._products = (prods.length ? prods : all);
+}
+async function sendChat() {
+  const inp = $('#chatInput'); if (!inp.value.trim()) return;
+  await api(`/api/streams/${streamId}/chat`, { method: 'POST', body: JSON.stringify({ author: displayName(), text: inp.value }) });
+  inp.value = ''; loadChatProducts();
+}
+$('#chatInput').addEventListener('keydown', e => { if (e.key === 'Enter') sendChat(); });
+
+async function addProduct() {
+  const name = $('#pName').value.trim(), price = parseFloat($('#pPrice').value), stock = parseInt($('#pStock').value || '0', 10);
+  if (!name || !(price > 0)) { alert('Product name and a price above $0 are required.'); return; }
+  await api('/api/products', { method: 'POST', body: JSON.stringify({ name, price, stock, stream_id: streamId }) });
+  $('#pName').value = ''; $('#pPrice').value = ''; $('#pStock').value = ''; loadChatProducts();
+}
+
+async function openCheckout(productId) {
+  selectedProduct = window._products.find(p => p.id === productId);
+  if (!selectedProduct) return;
+  $('#checkoutItem').textContent = `${selectedProduct.name} — $${Number(selectedProduct.price).toFixed(2)}`;
+  $('#buyMsg').textContent = '';
+  const saved = await api('/api/payment-methods');
+  const def = saved.find(m => m.is_default) || saved[0];
+  selectedMethod = def ? `${def.label} (${def.kind}${def.last4_or_handle ? ' •• ' + def.last4_or_handle : ''})` : ONE_TIME_METHODS[0];
+  $('#payChoices').innerHTML =
+    saved.map(m => `<label style="display:block;margin:4px 0"><input type="radio" name="pay" style="width:auto" value="${esc(m.label)} (${esc(m.kind)}${m.last4_or_handle ? ' •• ' + esc(m.last4_or_handle) : ''})" ${m === def ? 'checked' : ''}> ${esc(m.label)} — ${esc(m.kind)}${m.last4_or_handle ? ' •• ' + esc(m.last4_or_handle) : ''}${m.is_default ? ' (default)' : ''}</label>`).join('') +
+    ONE_TIME_METHODS.map(m => `<label style="display:block;margin:4px 0"><input type="radio" name="pay" style="width:auto" value="${m}" ${!def && m === ONE_TIME_METHODS[0] ? 'checked' : ''}> ${m} (one-time)</label>`).join('');
+  document.querySelectorAll('input[name=pay]').forEach(r => r.addEventListener('change', () => selectedMethod = r.value));
+  $('#checkoutModal').style.display = 'flex';
+}
+function closeCheckout() { $('#checkoutModal').style.display = 'none'; }
+$('#confirmBuy').onclick = async () => {
+  const buyer = $('#buyerName').value.trim() || displayName();
+  try {
+    const order = await api('/api/orders', { method: 'POST', body: JSON.stringify({ product_id: selectedProduct.id, stream_id: streamId, buyer, payment_method: selectedMethod }) });
+    $('#buyMsg').innerHTML = `<span class="ok">Order #${order.id} recorded — paid with ${esc(order.payment_method)}. ${order.remaining_stock} left in stock. No real charge was made.</span>`;
+    loadChatProducts();
+  } catch (e) { $('#buyMsg').textContent = 'Could not complete purchase: ' + e.message; }
+};
+init();
+</script></body></html>

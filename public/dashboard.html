@@ -1,0 +1,85 @@
+<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Dashboard — LiveStream</title><link rel="stylesheet" href="/style.css"></head><body>
+<header><div class="logo">Live<span>Stream</span></div><nav>
+<a href="/">Discover</a><a href="/studio.html">Studio</a><a href="/dashboard.html">Dashboard</a><a href="/admin.html">Admin</a>
+</nav></header>
+<main>
+<h1>Dashboard</h1>
+<div class="stat-grid" id="stats"></div>
+
+<div class="card"><h2>Visitor analytics</h2>
+<p class="note">Simple first-party counts — every page load is one view, unique visitors are counted by a random cookie (no IP addresses stored, no third-party service).</p>
+<div id="analytics"></div></div>
+
+<div class="card"><h2>Payment options</h2>
+<p class="note">Save nicknamed payment methods for checkout. Only the label and last 4 digits / handle are stored — never full card numbers. The default is pre-selected at checkout. No real charging happens anywhere in this app.</p>
+<div id="methods"></div>
+<div class="row">
+<input id="mLabel" placeholder="Nickname (e.g. My Visa)" style="flex:2">
+<select id="mKind" style="flex:1"><option>Card</option><option>PayPal</option><option>Apple Pay</option><option>Google Pay</option><option>Cash App</option><option>Bank transfer</option></select>
+<input id="mLast4" placeholder="Last 4 / handle (optional)" style="flex:1">
+<button class="small" onclick="saveMethod()">Save method</button>
+</div><p id="mMsg"></p></div>
+
+<div class="card"><h2>List a product</h2>
+<div class="row"><input id="pName" placeholder="Product name" style="flex:2">
+<input id="pPrice" type="number" min="0.01" step="0.01" placeholder="Price ($)" style="flex:1">
+<input id="pStock" type="number" min="0" step="1" placeholder="Stock" style="flex:1">
+<button class="small" onclick="addProduct()">List product</button></div>
+<div id="productList"></div></div>
+
+<div class="card"><h2>Orders received</h2><div id="orders"></div></div>
+<div class="card"><h2>Stream history</h2><div id="history"></div></div>
+<div class="card"><h2>Channels you follow</h2><div id="follows"></div></div>
+<div class="card"><h2>Site admin</h2>
+<p class="note">Moderate streams, chat, products, orders and channels. Passcode protected — set <code>ADMIN_CODE</code> on the server first.</p>
+<p><a href="/admin.html">Open admin panel →</a></p></div>
+</main>
+<script src="/app.js"></script>
+<script>
+async function load() {
+  const s = await api('/api/stats');
+  $('#stats').innerHTML = [
+    ['Viewers now', s.viewers], ['Live streams', s.live_streams], ['Total streams', s.total_streams],
+    ['Listings', s.listings], ['Orders received', s.orders_received], ['Purchases', s.purchases],
+    ['Revenue (recorded)', '$' + Number(s.revenue).toFixed(2)], ['Follows', s.follows],
+    ['Total visits', s.total_visits], ['Unique visitors', s.unique_visitors], ['Visits today', s.visits_today],
+  ].map(([k, v]) => `<div class="stat"><b>${v}</b><span>${k}</span></div>`).join('');
+
+  const a = await api('/api/analytics');
+  $('#analytics').innerHTML =
+    `<h3>Views per page</h3>` + (a.per_page.length ? `<table><tr><th>Page</th><th>Views</th></tr>${a.per_page.map(r => `<tr><td>${esc(r.path)}</td><td>${r.views}</td></tr>`).join('')}</table>` : '<p class="note">No visits yet.</p>') +
+    `<h3>Visits per day (last 30 days)</h3>` + (a.per_day.length ? `<table><tr><th>Day</th><th>Visits</th></tr>${a.per_day.map(r => `<tr><td>${esc(r.day)}</td><td>${r.views}</td></tr>`).join('')}</table>` : '<p class="note">No visits yet.</p>');
+
+  const methods = await api('/api/payment-methods');
+  $('#methods').innerHTML = methods.length ? methods.map(m => `<p>${esc(m.label)} — ${esc(m.kind)}${m.last4_or_handle ? ' •• ' + esc(m.last4_or_handle) : ''} ${m.is_default ? '<b class="ok">(default)</b>' : `<button class="small secondary" onclick="setDefault(${m.id})">Set default</button>`} <button class="small secondary" onclick="delMethod(${m.id})">Remove</button></p>`).join('') : '<p class="note">No saved methods yet.</p>';
+
+  const prods = await api('/api/products');
+  $('#productList').innerHTML = prods.length ? `<table><tr><th>Product</th><th>Price</th><th>Stock</th><th>Pinned stream</th></tr>${prods.map(p => `<tr><td>${esc(p.name)}</td><td>$${Number(p.price).toFixed(2)}</td><td>${p.stock}</td><td>${p.stream_id ? 'Stream #' + p.stream_id : '—'}</td></tr>`).join('')}</table>` : '<p class="note">No listings yet.</p>';
+
+  const orders = await api('/api/orders');
+  $('#orders').innerHTML = orders.length ? `<table><tr><th>Order</th><th>Product</th><th>Buyer</th><th>Amount</th><th>Payment method</th><th>When</th></tr>${orders.map(o => `<tr><td>#${o.id}</td><td>${esc(o.product_name || '')}</td><td>${esc(o.buyer)}</td><td>$${Number(o.amount).toFixed(2)}</td><td>${esc(o.payment_method)}</td><td>${new Date(o.created_at).toLocaleString()}</td></tr>`).join('')}</table>` : '<p class="note">No orders yet.</p>';
+
+  const streams = await api('/api/streams');
+  $('#history').innerHTML = streams.length ? streams.map(s => `<p><span class="${s.status === 'live' ? 'live-badge' : 'ended-badge'}">${s.status.toUpperCase()}</span> <b>${esc(s.title)}</b> — ${esc(s.channel_name)} · ${esc(s.category)} · 👁 ${s.viewer_count} · ${new Date(s.created_at).toLocaleString()} ${s.status === 'live' ? `<a href="/room.html?id=${s.id}">Watch</a>` : ''}</p>`).join('') : '<p class="note">No streams yet.</p>';
+
+  const follows = await api('/api/follows');
+  $('#follows').innerHTML = follows.length ? follows.map(f => `<p>${esc(f.channel)} <button class="small secondary" onclick="unfollow('${esc(f.channel)}')">Unfollow</button></p>`).join('') : '<p class="note">You are not following anyone yet.</p>';
+}
+async function saveMethod() {
+  const label = $('#mLabel').value.trim(), kind = $('#mKind').value, last4 = $('#mLast4').value.trim();
+  if (!label) { $('#mMsg').textContent = 'Give the method a nickname first.'; return; }
+  await api('/api/payment-methods', { method: 'POST', body: JSON.stringify({ label, kind, last4_or_handle: last4 }) });
+  $('#mLabel').value = ''; $('#mLast4').value = ''; $('#mMsg').textContent = 'Saved.'; load();
+}
+async function setDefault(id) { await api(`/api/payment-methods/${id}/default`, { method: 'POST' }); load(); }
+async function delMethod(id) { await api(`/api/payment-methods/${id}`, { method: 'DELETE' }); load(); }
+async function unfollow(ch) { await fetch('/api/follows?channel=' + encodeURIComponent(ch), { method: 'DELETE' }); load(); }
+async function addProduct() {
+  const name = $('#pName').value.trim(), price = parseFloat($('#pPrice').value), stock = parseInt($('#pStock').value || '0', 10);
+  if (!name || !(price > 0)) { alert('Product name and a price above $0 are required.'); return; }
+  await api('/api/products', { method: 'POST', body: JSON.stringify({ name, price, stock }) });
+  $('#pName').value = ''; $('#pPrice').value = ''; $('#pStock').value = ''; load();
+}
+load();
+</script></body></html>

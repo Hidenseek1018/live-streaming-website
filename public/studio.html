@@ -1,0 +1,130 @@
+<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Studio — Go Live</title><link rel="stylesheet" href="/style.css"></head><body>
+<header><div class="logo">Live<span>Stream</span></div><nav>
+<a href="/">Discover</a><a href="/studio.html">Studio</a><a href="/dashboard.html">Dashboard</a><a href="/admin.html">Admin</a>
+</nav></header>
+<main>
+<h1>Studio</h1>
+<div class="card" id="setup">
+<label>Channel name</label><input id="channel" placeholder="e.g. MariasKitchen">
+<label>Stream title</label><input id="title" placeholder="e.g. Cooking live — tonight's special">
+<label>Category</label><select id="category"></select>
+<div class="row"><button id="previewBtn">Preview camera</button><button id="goLiveBtn">🔴 Go live</button></div>
+<p class="note" id="setupMsg"></p>
+</div>
+
+<div class="card" id="livePanel" style="display:none">
+<h2 id="liveTitle"></h2>
+<p><span class="live-badge">● LIVE</span> <span id="broadcastState">Broadcasting video · 0 viewers connected</span></p>
+<video id="localVideo" autoplay muted playsinline></video>
+<p class="note" id="camNote"></p>
+<div class="row"><button id="endBtn">End stream</button><a href="/dashboard.html"><button class="secondary">Open Dashboard</button></a></div>
+<div class="row" style="margin-top:14px">
+<div style="flex:2;min-width:260px"><h3>Live chat</h3><div id="chat"></div>
+<div class="row"><input id="chatInput" placeholder="Chat as host…" style="flex:1"><button class="small" onclick="sendChat()">Send</button></div></div>
+<div style="flex:1;min-width:220px"><h3>Sales while live</h3><div id="sales">No orders yet.</div>
+<h3 style="margin-top:16px">List a product</h3>
+<input id="pName" placeholder="Product name"><input id="pPrice" type="number" min="0.01" step="0.01" placeholder="Price ($)">
+<input id="pStock" type="number" min="0" step="1" placeholder="Stock"><button class="small" onclick="addProduct()">Add product (pinned to this stream)</button></div>
+</div>
+</div>
+</main>
+<script src="/app.js"></script>
+<script>
+const catSel = $('#category');
+CATEGORIES.forEach(c => { const o = document.createElement('option'); o.textContent = c; catSel.appendChild(o); });
+let localStream = null, streamId = null, pcs = {}, signalSince = 0, pollTimer = null, chatTimer = null;
+const HOST_ID = 'host';
+
+async function preview() {
+  try {
+    localStream = await navigator.mediaDevices.getUserMedia({ video: true, audio: true });
+    $('#localVideo').srcObject = localStream;
+    $('#camNote').textContent = 'Camera preview on. Viewers will receive this feed over WebRTC once you go live.';
+  } catch (e) {
+    $('#camNote').textContent = 'Could not access camera/microphone: ' + e.message + ' — you can still go live, but viewers will see a "host camera off" message.';
+  }
+}
+$('#previewBtn').onclick = preview;
+
+$('#goLiveBtn').onclick = async () => {
+  const channel = $('#channel').value.trim(), title = $('#title').value.trim();
+  if (!channel || !title) { $('#setupMsg').textContent = 'Channel name and title are required.'; return; }
+  if (!localStream) await preview();
+  const s = await api('/api/streams', { method: 'POST', body: JSON.stringify({ channel_name: channel, title, category: catSel.value }) });
+  streamId = s.id;
+  $('#setup').style.display = 'none'; $('#livePanel').style.display = 'block';
+  $('#liveTitle').textContent = s.title + ' — ' + s.channel_name;
+  if (localStream) $('#localVideo').srcObject = localStream;
+  signalSince = 0; pollTimer = setInterval(pollSignals, 1500);
+  chatTimer = setInterval(loadChatSales, 3000); loadChatSales();
+};
+
+function updateIndicator() {
+  const connected = Object.values(pcs).filter(pc => pc.connectionState === 'connected' || pc.connectionState === 'connecting').length;
+  $('#broadcastState').textContent = `Broadcasting video · ${connected} viewer${connected === 1 ? '' : 's'} connected`;
+}
+
+async function pollSignals() {
+  if (!streamId) return;
+  const sigs = await api(`/api/signals?streamId=${streamId}&peerId=${HOST_ID}&since=${signalSince}`);
+  for (const sig of sigs) {
+    signalSince = Math.max(signalSince, sig.id);
+    if (sig.type === 'join') await handleJoin(sig.from_id);
+    else if (sig.type === 'answer') { const pc = pcs[sig.from_id]; if (pc && sig.payload.sdp) await pc.setRemoteDescription(sig.payload).catch(console.warn); }
+    else if (sig.type === 'ice') { const pc = pcs[sig.from_id]; if (pc && sig.payload.candidate) await pc.addIceCandidate(sig.payload).catch(console.warn); }
+  }
+  updateIndicator();
+}
+
+async function handleJoin(viewerId) {
+  if (pcs[viewerId]) return;
+  const pc = new RTCPeerConnection({ iceServers: [{ urls: 'stun:stun.l.google.com:19302' }] });
+  pcs[viewerId] = pc;
+  pc.onconnectionstatechange = updateIndicator;
+  pc.onicecandidate = (e) => {
+    if (e.candidate) api('/api/signals', { method: 'POST', body: JSON.stringify({ stream_id: streamId, from_id: HOST_ID, to_id: viewerId, type: 'ice', payload: e.candidate }) });
+  };
+  if (localStream) localStream.getTracks().forEach(t => pc.addTrack(t, localStream));
+  const offer = await pc.createOffer();
+  await pc.setLocalDescription(offer);
+  await api('/api/signals', { method: 'POST', body: JSON.stringify({ stream_id: streamId, from_id: HOST_ID, to_id: viewerId, type: 'offer', payload: offer }) });
+  updateIndicator();
+}
+
+async function loadChatSales() {
+  if (!streamId) return;
+  const msgs = await api(`/api/streams/${streamId}/chat`);
+  $('#chat').innerHTML = msgs.map(m => `<p><b>${esc(m.author)}:</b> ${esc(m.text)}</p>`).join('') || '<p class="note">No chat yet.</p>';
+  $('#chat').scrollTop = $('#chat').scrollHeight;
+  const orders = (await api('/api/orders')).filter(o => o.stream_id === streamId);
+  $('#sales').innerHTML = orders.length
+    ? orders.map(o => `<p>${esc(o.product_name || 'Product')} — $${Number(o.amount).toFixed(2)} · ${esc(o.buyer)} · <i>${esc(o.payment_method)}</i></p>`).join('')
+    : 'No orders yet.';
+}
+
+async function sendChat() {
+  const inp = $('#chatInput'); if (!inp.value.trim()) return;
+  await api(`/api/streams/${streamId}/chat`, { method: 'POST', body: JSON.stringify({ author: displayName() + ' (host)', text: inp.value }) });
+  inp.value = ''; loadChatSales();
+}
+$('#chatInput').addEventListener('keydown', e => { if (e.key === 'Enter') sendChat(); });
+
+async function addProduct() {
+  const name = $('#pName').value.trim(), price = parseFloat($('#pPrice').value), stock = parseInt($('#pStock').value || '0', 10);
+  if (!name || !(price > 0)) { alert('Product name and a price above $0 are required.'); return; }
+  await api('/api/products', { method: 'POST', body: JSON.stringify({ name, price, stock, stream_id: streamId }) });
+  $('#pName').value = ''; $('#pPrice').value = ''; $('#pStock').value = '';
+  alert('Product listed and pinned to this stream.');
+}
+
+$('#endBtn').onclick = async () => {
+  if (!streamId) return;
+  await api(`/api/streams/${streamId}/end`, { method: 'POST' });
+  clearInterval(pollTimer); clearInterval(chatTimer);
+  Object.values(pcs).forEach(pc => pc.close()); pcs = {};
+  if (localStream) localStream.getTracks().forEach(t => t.stop());
+  alert('Stream ended. Connections closed and signals cleared.');
+  location.href = '/dashboard.html';
+};
+</script></body></html>

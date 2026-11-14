@@ -1,0 +1,1 @@
+{"description":"Live-streaming platform with WebRTC video relay, live chat, shop, orders and payment options. No real charging.","engines":{"node":">=22.5"},"license":"MIT","main":"server.js","name":"live-streaming-website","scripts":{"start":"node server.js"},"type":"commonjs","version":"1.0.0"}

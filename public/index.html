@@ -1,0 +1,292 @@
+<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Live — Discover</title><link rel="stylesheet" href="/style.css"></head><body>
+<header><div class="logo">Live<span>Stream</span></div><nav>
+<a href="/">Discover</a><a href="/studio.html">Studio</a><a href="/dashboard.html">Dashboard</a><a href="/admin.html">Admin</a>
+</nav></header>
+<main class="feed-page">
+<div class="stories-row" id="stories"></div>
+<div class="feed-search row">
+<input id="q" type="search" placeholder="Search streams or channels…" style="flex:2;min-width:200px">
+<select id="cat" style="flex:1;min-width:140px"><option>All</option></select>
+</div>
+<div id="feed" class="tiktok-feed"></div>
+<section class="browse">
+<h2>Shop the feed</h2>
+<div id="shopGrid" class="grid"></div>
+<h2>Recent activity</h2>
+<div id="activity" class="card"><p class="note">Loading…</p></div>
+<h2>Ended streams</h2>
+<div id="ended" class="grid"></div>
+</section>
+</main>
+
+<div id="sheet" class="sheet" style="display:none">
+<div class="sheet-head"><h3 id="sheetTitle">Comments</h3><button class="small secondary" onclick="closeSheet()">✕ Close</button></div>
+<div class="sheet-body" id="sheetChat"></div>
+<div class="sheet-foot"><input id="sheetInput" placeholder="Add a comment…" style="flex:1"><button class="small" onclick="sendSheetChat()">Send</button></div>
+</div>
+
+<script src="/app.js"></script>
+<script>
+const feedEl = $('#feed');
+const catSel = $('#cat');
+CATEGORIES.forEach(c => { const o = document.createElement('option'); o.textContent = c; catSel.appendChild(o); });
+const myPeer = viewerId();
+let follows = new Set();
+let liveStreams = [];
+let active = null; // {streamId, slide, video, pc, pollTimer, hbTimer, signalSince, gotVideo, failTimer}
+let observer = null;
+let sheetStreamId = null, sheetTimer = null;
+
+function streamParams() {
+  const q = $('#q').value, cat = catSel.value;
+  const params = new URLSearchParams(); if (cat !== 'All') params.set('category', cat); if (q) params.set('q', q);
+  return params;
+}
+
+async function load(preserveId) {
+  follows = new Set((await api('/api/follows')).map(f => f.channel));
+  const streams = await api('/api/streams?' + streamParams());
+  const live = streams.filter(s => s.status === 'live');
+  const keepId = preserveId || (active && active.streamId);
+  deactivate();
+  liveStreams = live;
+  renderStories(live);
+  renderSlides(live);
+  renderBrowse(streams);
+  if (keepId) {
+    const idx = live.findIndex(s => s.id === keepId);
+    if (idx >= 0) feedEl.scrollTop = idx * feedEl.clientHeight;
+  }
+  observeSlides();
+}
+
+function renderStories(live) {
+  const seen = new Map();
+  live.forEach(s => { if (!seen.has(s.channel_name)) seen.set(s.channel_name, s); });
+  const chans = [...seen.values()];
+  const row = $('#stories');
+  if (!chans.length) { row.style.display = 'none'; row.innerHTML = ''; return; }
+  row.style.display = 'flex';
+  row.innerHTML = chans.map(s => `<button class="story" data-story="${s.id}">
+    <div class="story-avatar">${esc((s.channel_name || '?')[0].toUpperCase())}</div>
+    <span>${esc(s.channel_name)}</span><span class="live-tag">● LIVE</span></button>`).join('');
+}
+$('#stories').addEventListener('click', (e) => {
+  const b = e.target.closest('[data-story]');
+  if (!b) return;
+  const idx = liveStreams.findIndex(s => s.id === Number(b.dataset.story));
+  if (idx >= 0) feedEl.scrollTo({ top: idx * feedEl.clientHeight, behavior: 'smooth' });
+});
+
+function slideHTML(s) {
+  const followed = follows.has(s.channel_name);
+  return `<div class="feed-slide" data-id="${s.id}">
+  <video class="feed-video" muted playsinline autoplay></video>
+  <div class="feed-scrim"></div>
+  <div class="feed-state">Connecting to host…</div>
+  <div class="feed-info">
+    <div class="chan">${esc(s.channel_name)}</div>
+    <h3>${esc(s.title)}</h3>
+    <div class="meta">${esc(s.category)} · 👁 <span class="vc">${s.viewer_count}</span> watching · ❤️ <span class="lc">${s.like_count}</span></div>
+    <div><a href="/room.html?id=${s.id}">Watch in room →</a></div>
+  </div>
+  <div class="feed-rail">
+    <div class="rail-item"><button class="rail-btn" data-like="${s.id}">🤍</button><span class="rail-count like-count">${s.like_count}</span></div>
+    <div class="rail-item"><button class="rail-btn" data-comment="${s.id}">💬</button><span class="rail-count">Chat</span></div>
+    <div class="rail-item"><button class="rail-btn" data-share="${s.id}">↗️</button><span class="rail-count">Share</span></div>
+    <div class="rail-item"><button class="rail-btn" data-follow="${esc(s.channel_name)}">${followed ? '✓' : '+'}</button><span class="rail-count">${followed ? 'Following' : 'Follow'}</span></div>
+  </div>
+</div>`;
+}
+
+function renderSlides(live) {
+  if (!live.length) {
+    feedEl.innerHTML = `<div class="feed-slide"><div class="feed-empty"><h2>No one is live right now</h2><p class="note">Be the first to go live, or check back soon.</p><a href="/studio.html"><button>Go live in the Studio</button></a></div></div>`;
+    return;
+  }
+  feedEl.innerHTML = live.map(slideHTML).join('');
+}
+
+async function renderBrowse(streams) {
+  const ended = streams.filter(s => s.status !== 'live');
+  $('#ended').innerHTML = ended.length ? ended.map(s => `<div class="stream-card" onclick="location.href='/room.html?id=${s.id}'">
+    <div class="row" style="justify-content:space-between"><span class="ended-badge">ENDED</span><span class="cat">${esc(s.category)}</span></div>
+    <h3 style="margin:10px 0 4px">${esc(s.title)}</h3><div>${esc(s.channel_name)}</div>
+    <div class="meta">${new Date(s.created_at).toLocaleString()}</div></div>`).join('') : '<p class="note">No ended streams yet.</p>';
+  try {
+    const prods = await api('/api/products');
+    $('#shopGrid').innerHTML = prods.length ? prods.map(p => `<div class="stream-card" onclick="location.href='${p.stream_id ? '/room.html?id=' + p.stream_id : '/dashboard.html'}'">
+      <h3 style="margin:10px 0 4px">${esc(p.name)}</h3>
+      <div>$${Number(p.price).toFixed(2)} · ${p.stock} in stock</div>
+      <div class="meta">${p.stream_id ? 'Pinned to stream #' + p.stream_id + ' — shop in the stream →' : 'Listed on the Dashboard'}</div></div>`).join('') : '<p class="note">Nothing for sale yet.</p>';
+  } catch (e) { $('#shopGrid').innerHTML = '<p class="note">Could not load products.</p>'; }
+  try {
+    const act = await api('/api/activity?limit=20');
+    $('#activity').innerHTML = act.length ? act.map(a => a.kind === 'chat'
+      ? `<p>💬 <b>${esc(a.actor)}</b> on <b>${esc(a.stream_title || '')}</b> (${esc(a.channel_name || '')}): ${esc(a.detail)}</p>`
+      : `<p>🛍 <b>${esc(a.actor)}</b> bought <b>${esc(a.detail)}</b>${a.stream_title ? ` on ${esc(a.stream_title)}` : ''}</p>`).join('') : '<p class="note">No activity yet.</p>';
+  } catch (e) { $('#activity').innerHTML = '<p class="note">Could not load activity.</p>'; }
+}
+
+// ---- Live video in the active slide (same viewer flow as the room) ----
+function observeSlides() {
+  if (observer) observer.disconnect();
+  observer = new IntersectionObserver((entries) => {
+    for (const en of entries) {
+      if (en.isIntersecting) {
+        const id = Number(en.target.dataset.id);
+        const s = liveStreams.find(x => x.id === id);
+        if (s) activate(s, en.target);
+      } else if (active && Number(en.target.dataset.id) === active.streamId) {
+        deactivate();
+      }
+    }
+  }, { root: feedEl, threshold: 0.6 });
+  feedEl.querySelectorAll('.feed-slide[data-id]').forEach(el => observer.observe(el));
+}
+
+async function activate(stream, slide) {
+  deactivate();
+  const video = slide.querySelector('video');
+  const state = slide.querySelector('.feed-state');
+  const conn = { streamId: stream.id, slide, video, pc: null, signalSince: 0, gotVideo: false };
+  active = conn;
+  state.textContent = 'Connecting to host…';
+  const beat = async () => {
+    try {
+      const r = await api(`/api/streams/${stream.id}/heartbeat`, { method: 'POST', body: JSON.stringify({ peer_id: myPeer }) });
+      const vc = slide.querySelector('.vc'); if (vc) vc.textContent = r.viewer_count;
+    } catch (e) { /* stream may have ended */ }
+  };
+  await beat();
+  conn.hbTimer = setInterval(beat, 10000);
+  try { await api('/api/signals', { method: 'POST', body: JSON.stringify({ stream_id: stream.id, from_id: myPeer, to_id: 'host', type: 'join', payload: {} }) }); } catch (e) {}
+  conn.pollTimer = setInterval(() => pollSignals(conn), 1500);
+  conn.failTimer = setTimeout(() => {
+    if (active === conn && !conn.gotVideo) state.textContent = "Couldn't establish a live video connection — the host's camera may be off. Chat and shopping still work in the room.";
+  }, 20000);
+  try {
+    const l = await api(`/api/streams/${stream.id}/like?peer_id=${myPeer}`);
+    updateLikeUI(slide, l.liked, l.likes);
+  } catch (e) {}
+}
+
+function deactivate() {
+  if (!active) return;
+  const c = active; active = null;
+  clearInterval(c.pollTimer); clearInterval(c.hbTimer); clearTimeout(c.failTimer);
+  if (c.pc) { try { c.pc.close(); } catch (e) {} }
+  if (c.video) c.video.srcObject = null;
+}
+
+async function pollSignals(conn) {
+  try {
+    const sigs = await api(`/api/signals?streamId=${conn.streamId}&peerId=${myPeer}&since=${conn.signalSince}`);
+    for (const sig of sigs) {
+      conn.signalSince = Math.max(conn.signalSince, sig.id);
+      if (sig.type === 'offer') await handleOffer(conn, sig.payload);
+      else if (sig.type === 'ice' && conn.pc && sig.payload.candidate) await conn.pc.addIceCandidate(sig.payload).catch(() => {});
+    }
+  } catch (e) {}
+}
+
+async function handleOffer(conn, offer) {
+  if (conn.pc) conn.pc.close();
+  const pc = new RTCPeerConnection({ iceServers: [{ urls: 'stun:stun.l.google.com:19302' }] });
+  conn.pc = pc;
+  pc.onicecandidate = (e) => { if (e.candidate) api('/api/signals', { method: 'POST', body: JSON.stringify({ stream_id: conn.streamId, from_id: myPeer, to_id: 'host', type: 'ice', payload: e.candidate }) }); };
+  pc.ontrack = (e) => {
+    conn.gotVideo = true;
+    conn.video.srcObject = e.streams[0];
+    conn.video.play().catch(() => {});
+    const st = conn.slide.querySelector('.feed-state');
+    if (st) st.textContent = '🔴 Live video — tap video for sound';
+  };
+  await pc.setRemoteDescription(offer);
+  const answer = await pc.createAnswer();
+  await pc.setLocalDescription(answer);
+  await api('/api/signals', { method: 'POST', body: JSON.stringify({ stream_id: conn.streamId, from_id: myPeer, to_id: 'host', type: 'answer', payload: answer }) });
+}
+
+// ---- Rail actions: like / comment / share / follow ----
+function updateLikeUI(slide, liked, likes) {
+  const btn = slide.querySelector('[data-like]');
+  const count = slide.querySelector('.like-count');
+  if (btn) { btn.textContent = liked ? '❤️' : '🤍'; btn.classList.toggle('liked', liked); }
+  if (count) count.textContent = likes;
+  const lc = slide.querySelector('.lc'); if (lc) lc.textContent = likes;
+}
+async function toggleLike(id) {
+  const r = await api(`/api/streams/${id}/like`, { method: 'POST', body: JSON.stringify({ peer_id: myPeer }) });
+  const slide = feedEl.querySelector(`.feed-slide[data-id="${id}"]`);
+  if (slide) updateLikeUI(slide, r.liked, r.likes);
+}
+async function toggleFollow(channel) {
+  const followed = follows.has(channel);
+  if (followed) { await fetch('/api/follows?channel=' + encodeURIComponent(channel), { method: 'DELETE' }); follows.delete(channel); }
+  else { await api('/api/follows', { method: 'POST', body: JSON.stringify({ channel }) }); follows.add(channel); }
+  feedEl.querySelectorAll('[data-follow]').forEach(b => {
+    if (b.dataset.follow === channel) {
+      b.textContent = follows.has(channel) ? '✓' : '+';
+      const label = b.parentElement.querySelector('.rail-count');
+      if (label) label.textContent = follows.has(channel) ? 'Following' : 'Follow';
+    }
+  });
+}
+async function shareStream(id, btn) {
+  const url = location.origin + '/room.html?id=' + id;
+  try { await navigator.clipboard.writeText(url); btn.textContent = '✓'; setTimeout(() => btn.textContent = '↗️', 1500); }
+  catch (e) { prompt('Copy this link:', url); }
+}
+feedEl.addEventListener('click', async (e) => {
+  const likeBtn = e.target.closest('[data-like]');
+  if (likeBtn) { toggleLike(Number(likeBtn.dataset.like)); return; }
+  const cBtn = e.target.closest('[data-comment]');
+  if (cBtn) { const id = Number(cBtn.dataset.comment); const s = liveStreams.find(x => x.id === id); openSheet(id, s ? s.title : 'Stream'); return; }
+  const sBtn = e.target.closest('[data-share]');
+  if (sBtn) { shareStream(Number(sBtn.dataset.share), sBtn); return; }
+  const fBtn = e.target.closest('[data-follow]');
+  if (fBtn) { toggleFollow(fBtn.dataset.follow); return; }
+  const vid = e.target.closest('video');
+  if (vid && active && vid === active.video && active.gotVideo) {
+    vid.muted = !vid.muted;
+    const st = active.slide.querySelector('.feed-state');
+    if (st) st.textContent = vid.muted ? '🔴 Live video — tap video for sound' : '🔴 Live video with sound';
+  }
+});
+
+// ---- Comment sheet ----
+function openSheet(id, title) {
+  sheetStreamId = id;
+  $('#sheetTitle').textContent = 'Comments — ' + title;
+  $('#sheet').style.display = 'flex';
+  loadSheetChat();
+  sheetTimer = setInterval(loadSheetChat, 3000);
+}
+function closeSheet() { $('#sheet').style.display = 'none'; clearInterval(sheetTimer); sheetStreamId = null; }
+async function loadSheetChat() {
+  if (!sheetStreamId) return;
+  const msgs = await api(`/api/streams/${sheetStreamId}/chat`);
+  $('#sheetChat').innerHTML = msgs.map(m => `<p><b>${esc(m.author)}:</b> ${esc(m.text)}</p>`).join('') || '<p class="note">No comments yet.</p>';
+}
+async function sendSheetChat() {
+  const inp = $('#sheetInput'); if (!inp.value.trim() || !sheetStreamId) return;
+  await api(`/api/streams/${sheetStreamId}/chat`, { method: 'POST', body: JSON.stringify({ author: displayName(), text: inp.value }) });
+  inp.value = ''; loadSheetChat();
+}
+$('#sheetInput').addEventListener('keydown', e => { if (e.key === 'Enter') sendSheetChat(); });
+
+// ---- Filters + live-list refresh ----
+$('#q').addEventListener('input', () => load());
+catSel.addEventListener('change', () => load());
+setInterval(async () => {
+  try {
+    const streams = await api('/api/streams?' + streamParams());
+    const live = streams.filter(s => s.status === 'live');
+    if (live.map(s => s.id).join(',') !== liveStreams.map(s => s.id).join(',')) load(active ? active.streamId : null);
+  } catch (e) {}
+}, 30000);
+
+load();
+</script></body></html>
