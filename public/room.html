@@ -2,13 +2,13 @@
 <title>Watch — LiveStream</title><link rel="stylesheet" href="/style.css"><link rel="manifest" href="/manifest.json"><meta name="theme-color" content="#0c0e13"></head><body>
 <header><div class="logo">Live<span>Stream</span></div><nav>
 <a href="/">Breaks</a><a href="/studio.html">Studio</a><a href="/sell.html">Sell</a><a href="/dashboard.html">Dashboard</a><a href="/admin.html">Admin</a>
-</nav></header>
+</nav><button class="small secondary" onclick="shareCurrent()" style="margin-left:auto">🔗 Share</button></header>
 <main>
 <div id="room"></div>
 <div id="breakSection"></div>
 <div class="card" id="videoCard"><video id="remoteVideo" autoplay muted playsinline></video>
 <p id="videoState" class="warn">Connecting to host…</p>
-<div class="row"><button id="unmuteBtn" class="secondary">▶ Play with sound</button></div></div>
+<div class="row"><button id="unmuteBtn" class="secondary">▶ Play with sound</button><button class="secondary" onclick="shareCurrent()">🔗 Share this stream</button></div></div>
 
 <div class="row" style="align-items:flex-start">
 <div class="card" style="flex:2;min-width:280px"><h2>Live chat</h2><div id="chat"></div>

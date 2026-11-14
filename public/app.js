@@ -78,6 +78,28 @@ function toast(message, type = 'ok', ms = 3200) {
   }, ms);
 }
 
+// Share the current page: the phone's share sheet when available (so it
+// can go to messages, social apps, email…), otherwise copy the link.
+// In a stream room the link is that stream's link; elsewhere it is the page.
+async function shareCurrent() {
+  const url = location.href;
+  const data = { title: document.title || 'LiveStream', text: 'Watch live on LiveStream', url };
+  if (navigator.share) {
+    try { await navigator.share(data); return; }
+    catch (e) { if (e && e.name === 'AbortError') return; }
+  }
+  try {
+    await navigator.clipboard.writeText(url);
+    toast('Link copied — paste it anywhere to share', 'ok');
+    return;
+  } catch (e) {}
+  const ta = document.createElement('textarea');
+  ta.value = url; document.body.appendChild(ta); ta.select();
+  try { document.execCommand('copy'); toast('Link copied — paste it anywhere to share', 'ok'); }
+  catch (e2) { toast('Copy this link: ' + url, 'warn'); }
+  ta.remove();
+}
+
 /* ---- Active nav highlight ---- */
 (function markActiveNav() {
   const path = location.pathname.replace(/\/$/, '') || '/';
