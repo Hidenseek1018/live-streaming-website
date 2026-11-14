@@ -1,22 +1,36 @@
 <!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Live — Discover</title><link rel="stylesheet" href="/style.css"><link rel="manifest" href="/manifest.json"><meta name="theme-color" content="#0c0e13"></head><body>
+<title>Breaks — Live Sports Memorabilia</title><link rel="stylesheet" href="/style.css"><link rel="manifest" href="/manifest.json"><meta name="theme-color" content="#0c0e13"></head><body>
 <header><div class="logo">Live<span>Stream</span></div><nav>
-<a href="/">Discover</a><a href="/studio.html">Studio</a><a href="/dashboard.html">Dashboard</a><a href="/admin.html">Admin</a>
+<a href="/">Breaks</a><a href="/studio.html">Studio</a><a href="/dashboard.html">Dashboard</a><a href="/admin.html">Admin</a>
 </nav><span class="live-pill" id="headerLivePill">● LIVE</span></header>
 <main class="feed-page">
 <div class="stories-row" id="stories"></div>
+<div class="break-hero">
+  <div>
+    <h2>🔥 Live breaks — sports memorabilia, opened live</h2>
+    <p class="note">Buy a spot, watch the host open the box on camera, and get what your spot pulls. Cards, autographs, jerseys, game-used gear — all of it.</p>
+  </div>
+  <a href="/studio.html"><button>🎲 Start a break</button></a>
+</div>
+<div class="cat-chips" id="breakCats"></div>
 <div class="feed-search row">
 <input id="q" type="search" placeholder="Search streams or channels…" style="flex:2;min-width:200px">
 <select id="cat" style="flex:1;min-width:140px"><option>All</option></select>
 </div>
 <div id="feed" class="tiktok-feed"><div class="feed-slide"><div class="feed-empty"><div class="icon">📡</div><h2>Finding live streams…</h2><p class="note">One moment while we load what's live.</p></div></div></div>
 <section class="browse">
+<h2>🔴 Live breaks</h2>
+<div id="liveBreaks" class="grid"></div>
+<h2>📅 Upcoming breaks</h2>
+<div id="upcomingBreaks" class="grid"></div>
+<h2>🏆 Finished breaks</h2>
+<div id="finishedBreaks" class="grid"></div>
+<h2>Replays</h2>
+<div id="replays" class="grid"></div>
 <h2>Shop the feed</h2>
 <div id="shopGrid" class="grid"></div>
 <h2>Recent activity</h2>
 <div id="activity" class="card"><p class="note">Loading…</p></div>
-<h2>Replays</h2>
-<div id="replays" class="grid"></div>
 <h2>Ended streams</h2>
 <div id="ended" class="grid"></div>
 </section>
@@ -44,6 +58,57 @@ let liveStreams = [];
 let active = null; // {streamId, slide, video, pc, pollTimer, hbTimer, signalSince, gotVideo, failTimer}
 let observer = null;
 let sheetStreamId = null, sheetTimer = null;
+let breakCat = 'All';
+
+// ---- Break category chips (memorabilia filter for the breaks sections) ----
+const chipsEl = $('#breakCats');
+['All', ...BREAK_CATEGORIES].forEach(c => {
+  const b = document.createElement('button');
+  b.className = 'chip' + (c === 'All' ? ' active' : '');
+  b.textContent = c;
+  b.onclick = () => {
+    breakCat = c;
+    chipsEl.querySelectorAll('.chip').forEach(x => x.classList.toggle('active', x === b));
+    renderBreaks();
+  };
+  chipsEl.appendChild(b);
+});
+let allBreaks = [];
+let allRecordings = [];
+function breakCard(b) {
+  const pct = b.spots_total ? Math.round((b.spots_sold / b.spots_total) * 100) : 0;
+  const rec = allRecordings.find(r => r.stream_id === b.stream_id);
+  const badge = b.status === 'live' ? '<span class="live-badge">● LIVE</span>'
+    : b.status === 'upcoming' ? '<span class="upcoming-badge">📅 UPCOMING</span>'
+    : '<span class="ended-badge">🏆 FINISHED</span>';
+  const cta = b.status === 'live' ? '▶ Watch &amp; buy spots'
+    : b.status === 'upcoming' ? '🎲 Get a spot'
+    : (rec ? '▶ Watch the replay' : 'View pulls');
+  const href = b.status === 'ended' && rec ? `/replay.html?id=${rec.id}` : `/room.html?id=${b.stream_id}`;
+  return `<div class="stream-card break-card" onclick="location.href='${href}'">
+    <div class="row" style="justify-content:space-between">${badge}<span class="cat">${esc(b.category)}</span></div>
+    <h3 style="margin:10px 0 4px">${esc(b.title)}</h3>
+    <div>${esc(b.channel_name)}${b.opening ? ' · ' + esc(b.opening) : ''}</div>
+    <div class="progress"><i style="width:${pct}%"></i></div>
+    <div class="meta">${b.spots_sold} of ${b.spots_total} spots sold · $${Number(b.spot_price).toFixed(2)} per spot${b.pulls_count ? ` · 🎉 ${b.pulls_count} pull${b.pulls_count === 1 ? '' : 's'}` : ''}</div>
+    <div style="margin-top:10px"><button class="small">${cta}</button></div></div>`;
+}
+function renderBreaks() {
+  const list = breakCat === 'All' ? allBreaks : allBreaks.filter(b => b.category === breakCat);
+  const live = list.filter(b => b.status === 'live');
+  const upcoming = list.filter(b => b.status === 'upcoming');
+  const finished = list.filter(b => b.status === 'ended');
+  $('#liveBreaks').innerHTML = live.length ? live.map(breakCard).join('') : '<p class="note">No live breaks right now — check the upcoming ones below, or start your own from the Studio.</p>';
+  $('#upcomingBreaks').innerHTML = upcoming.length ? upcoming.map(breakCard).join('') : '<p class="note">No upcoming breaks yet.</p>';
+  $('#finishedBreaks').innerHTML = finished.length ? finished.map(breakCard).join('') : '<p class="note">No finished breaks yet.</p>';
+}
+async function loadBreaks() {
+  try {
+    allBreaks = await api('/api/breaks');
+    try { allRecordings = await api('/api/recordings'); } catch (e) { allRecordings = []; }
+    renderBreaks();
+  } catch (e) { /* breaks list is a bonus — the feed still works without it */ }
+}
 
 function streamParams() {
   const q = $('#q').value, cat = catSel.value;
@@ -61,6 +126,7 @@ async function load(preserveId) {
   renderStories(live);
   renderSlides(live);
   renderBrowse(streams);
+  loadBreaks();
   if (keepId) {
     const idx = live.findIndex(s => s.id === keepId);
     if (idx >= 0) feedEl.scrollTop = idx * feedEl.clientHeight;
@@ -88,15 +154,17 @@ $('#stories').addEventListener('click', (e) => {
 
 function slideHTML(s) {
   const followed = follows.has(s.channel_name);
+  const br = s.break;
   return `<div class="feed-slide" data-id="${s.id}">
   <video class="feed-video" muted playsinline autoplay></video>
   <div class="feed-scrim"></div>
   <div class="feed-state">Connecting to host…</div>
   <div class="feed-info">
-    <div class="chan">${esc(s.channel_name)}</div>
+    <div class="chan">${esc(s.channel_name)}${br ? ' <span class="break-badge">🎲 BREAK</span>' : ''}</div>
     <h3>${esc(s.title)}</h3>
     <div class="meta">${esc(s.category)} · 👁 <span class="vc">${s.viewer_count}</span> watching · ❤️ <span class="lc">${s.like_count}</span></div>
-    <div style="margin-top:12px"><a href="/room.html?id=${s.id}"><button class="small">▶ Watch in room</button></a></div>
+    ${br ? `<div class="meta">🎲 ${br.spots_sold} of ${br.spots_total} spots sold · $${Number(br.spot_price).toFixed(2)} per spot${br.opening ? ' · ' + esc(br.opening) : ''}</div>` : ''}
+    <div style="margin-top:12px"><a href="/room.html?id=${s.id}"><button class="small">${br ? '🎲 Watch the break' : '▶ Watch in room'}</button></a></div>
   </div>
   <div class="feed-rail">
     <div class="rail-item"><button class="rail-btn" data-like="${s.id}">🤍</button><span class="rail-count like-count">${s.like_count}</span></div>
@@ -123,6 +191,7 @@ function renderSlides(live) {
           <li>Open <b>Studio</b> and set a channel name + title</li>
           <li>Preview your camera, then hit <b>Go live</b></li>
           <li>Share the room link — viewers join right from their browser</li>
+          <li>Running a break? Create it in the Studio first — viewers buy spots, then you open the box live</li>
         </ol>
       </div>
     </div></div>`;
@@ -327,6 +396,7 @@ setInterval(async () => {
     const streams = await api('/api/streams?' + streamParams());
     const live = streams.filter(s => s.status === 'live');
     if (live.map(s => s.id).join(',') !== liveStreams.map(s => s.id).join(',')) load(active ? active.streamId : null);
+    else loadBreaks();
   } catch (e) {}
 }, 30000);
 

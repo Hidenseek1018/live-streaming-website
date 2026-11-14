@@ -1,6 +1,10 @@
 # LiveStream — live-streaming platform
 
-A standalone live-streaming platform: discover feed, studio (go live with your
+A standalone live-streaming platform built around live **breaks** for sports
+memorabilia: the host goes live opening packs or boxes and the people who
+bought spots get what gets pulled. Discover is a breaks-first feed; the
+Studio creates breaks and records pulls live; rooms show the spots grid and
+pulls. The platform also has a discover feed, studio (go live with your
 camera), stream rooms with live video, chat, follows and shopping, a dashboard
 with stats and payment options, and checkout. Card payments run through Stripe
 Checkout when `STRIPE_SECRET_KEY` is set (test key first); without it, orders
@@ -28,9 +32,9 @@ npm start
 
 Then open http://localhost:3000
 
-- `/` — Discover: a TikTok-style vertical feed (see below)
-- `/studio.html` — set a channel, preview camera, go live, record the stream, monitor chat/sales, end stream
-- `/room.html?id=<stream id>` — watch, chat, follow, shop, checkout
+- `/` — Breaks: a breaks-first feed (live breaks, then upcoming, then replays) with memorabilia category filters
+- `/studio.html` — set a channel, preview camera, go live, record the stream, monitor chat/sales, end stream; create a break and record pulls live
+- `/room.html?id=<stream id>` — watch, chat, follow, shop, checkout; a break room shows the spots grid and pulls
 - `/replay.html?id=<recording id>` — watch a recorded stream back (plain video player, no live chat)
 - `/dashboard.html` — stats, listings, orders, payment options, stream history, recordings
 - `/admin.html` — passcode-protected admin panel (see below)
@@ -53,9 +57,67 @@ at the bottom, with Like / Comment / Share / Follow stacked on the right edge:
 - **Follow** — follows/unfollows the channel.
 
 Above the feed is a stories-style row of live channels (tap one to jump to
-its stream). Below the feed is a Facebook-style browse section: products for
-sale ("Shop the feed"), recent activity (latest chat and purchases), replays
-of recorded streams, and ended streams. Search and category filters still filter the live feed.
+its stream). Below the feed is a Facebook-style browse section: **live
+breaks first, then upcoming breaks, then finished breaks**, replays of
+recorded streams, products for sale ("Shop the feed"), recent activity
+(latest chat and purchases), and ended streams. A hero strip explains breaks
+in one line, and category chips filter the breaks by memorabilia category
+(Cards, Autographs, Jerseys, Balls & Equipment, Game-Used, Other). Search and
+category filters still filter the live feed. Break slides in the feed carry a
+🎲 BREAK badge with spots sold/total and price per spot.
+
+## Live breaks (sports memorabilia)
+
+The platform is built around live breaks — like a card break, but for all
+sports memorabilia (trading cards, autographed items, jerseys, balls,
+helmets, game-used gear, anything else sports):
+
+- **Creating a break (Studio):** title, memorabilia category, what is being
+  opened (e.g. "2024 Prizm Hobby Box"), price per spot, and the spots —
+  either a count (Spot 1…N) or one label per line (team names for card
+  breaks). Creating the break also creates the stream (status `upcoming`)
+  and one stock-1 product per spot. **Spots go on sale the moment the break
+  is created** — buyers do not have to wait for the live to start.
+- **Buying a spot (room):** a spot is a product, so buying one goes through
+  the existing checkout — record-only when Stripe is off, Stripe Checkout
+  when it is on. There is no second payment path. The spots grid shows each
+  spot as available (tap to buy), sold (with the buyer's name), or held
+  (someone's checkout is in progress — stock is 0 until it completes or is
+  released). The grid refreshes every 5 seconds. An unpaid Stripe order
+  holds the spot; only a paid confirmation marks it sold.
+- **Going live on a break:** from the Studio, "Go live" on an upcoming
+  break flips the break and its stream to `live`. The room then shows the
+  live video, the spots grid, and the pulls.
+- **Pulls (Studio, live):** during the break, the host records each pull —
+  the item that came out and which spot it goes to (e.g. "Gold Prizm — Spot
+  7 / Team: Lakers"). Pulls show on the break page in real time and stay
+  there after the break ends. Pulls are item description + spot only; no
+  photo upload in v1. The host can remove a pull from the Studio, and the
+  admin can remove one from the admin panel.
+- **Ending a break:** ending the stream ends the break too (and vice versa
+  from the admin panel). A finished break shows its pulls and links to its
+  replay if one was recorded. Deleting a stream deletes its break, pulls,
+  and spots; spot products with no orders are deleted too, while bought spot
+  products stay as plain listings so their orders keep working.
+- **Refunds:** a paid spot order refunds exactly like any other paid order —
+  admin **Refund via Stripe** returns the money to the buyer's card and
+  frees the spot so it can be sold again. Record-only cancel/refund also
+  frees the spot.
+- **Discover:** live breaks first, then upcoming, then finished breaks, then
+  replays — with category filtering. Plain (non-break) streams and product
+  listings still work underneath: a break's shop is its spots, and plain
+  listings still sell for non-break streams. Spot products are hidden from
+  the generic shop list (`GET /api/products` excludes them unless
+  `?spots=1`).
+- **Honest limits:**
+  - A spot buys a **chance** at what gets pulled, not a specific item. The
+    platform does not guarantee what any specific spot pulls.
+  - Pulls are entered by the host — the site **cannot verify what was
+    actually pulled on camera**. The pull is whatever the host records.
+    The Sales Policy and Terms say this plainly.
+  - There are no accounts, so "your breaks" on the Studio/Dashboard is
+    every break on the site, and pull entry in the Studio is a convention —
+    the admin passcode is the real control over what a break page shows.
 
 ## Stream recording & replays
 
@@ -254,7 +316,10 @@ Three plain-language legal pages, linked in the footer of every page:
 - **Seller &amp; Sales Policy** (`/sales-policy.html`) — how sales work,
   card payments via Stripe, refunds through Stripe for paid orders, buyer
   problem reports, listing reports, seller responsibilities, disputes, and
-  listing removal.
+  listing removal. Section 2 covers live breaks: what a spot buys (a chance
+  at the pulls, not a specific item), pulls are assigned by the host live on
+  camera, refunds work the same as any other paid order, and the platform
+  does not guarantee what any specific spot pulls.
 
 **Honesty built in:** all three pages describe what the site actually does —
 card payments go through Stripe when switched on (test mode until live
@@ -346,7 +411,11 @@ before relying on it being $0.
 | `DELETE /api/recordings/:id` | Delete a recording, file included (age-gated) |
 | `POST /api/streams/:id/heartbeat` `{peer_id}` | Viewer join/heartbeat → viewer count |
 | `GET/POST /api/streams/:id/chat` | Live chat |
-| `GET/POST /api/products` | Listings (optional `stream_id` pin) |
+| `GET /api/breaks?status=&category=&stream_id=` / `POST /api/breaks` | List breaks (live/upcoming/ended, by memorabilia category) / create a break with spots (age-gated) |
+| `GET /api/breaks/:id` | One break with its spots and pulls |
+| `POST /api/breaks/:id/go-live` | Go live on an upcoming break (age-gated) |
+| `GET /api/breaks/:id/pulls` · `POST /api/breaks/:id/pulls` `{spot_id, item}` · `DELETE /api/breaks/:id/pulls/:pullId` | Pulls: list / record one (age-gated) / remove one (age-gated) |
+| `GET /api/products` | Listings (optional `stream_id` pin); spot products are hidden unless `?spots=1` |
 | `GET/POST /api/orders` | Buy (decrements stock, records payment method) / list |
 | `GET /api/checkout/config` | Whether card checkout (Stripe) is switched on |
 | `POST /api/checkout` `{product_id, stream_id, buyer}` | Create a Stripe Checkout Session; returns the Stripe payment URL (age-gated) |
@@ -366,7 +435,8 @@ before relying on it being $0.
 | `GET /api/admin/chat` · `DELETE /api/admin/chat/:id` | Admin: recent chat, delete message |
 | `GET /api/admin/products` · `DELETE /api/admin/products/:id` | Admin: listings, remove listing |
 | `GET /api/admin/orders` · `POST /api/admin/orders/:id/status` `{status}` | Admin: orders, mark placed/cancelled/refunded |
-| `POST /api/admin/orders/:id/refund` | Admin: refund a paid Stripe order through Stripe (money back to the card, stock restored) |
+| `POST /api/admin/orders/:id/refund` | Admin: refund a paid Stripe order through Stripe (money back to the card, stock restored; frees a break spot) |
+| `GET /api/admin/breaks` · `POST /api/admin/breaks/:id/end` · `DELETE /api/admin/breaks/:id/pulls/:pullId` | Admin: list breaks, end a break (ends its stream too), remove a pull |
 | `GET /api/admin/disputes` · `POST /api/admin/disputes/:id/resolve` | Admin: buyer problem reports, mark one resolved |
 | `GET /api/admin/listing-reports` | Admin: recent listing reports with product and channel |
 | `GET /api/admin/recordings` · `DELETE /api/admin/recordings/:id` | Admin: list recordings, delete one (file included) |

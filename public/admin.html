@@ -1,11 +1,11 @@
 <!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Admin — LiveStream</title><link rel="stylesheet" href="/style.css"><link rel="manifest" href="/manifest.json"><meta name="theme-color" content="#0c0e13"></head><body>
 <header><div class="logo">Live<span>Stream</span></div><nav>
-<a href="/">Discover</a><a href="/studio.html">Studio</a><a href="/dashboard.html">Dashboard</a><a href="/admin.html">Admin</a>
+<a href="/">Breaks</a><a href="/studio.html">Studio</a><a href="/dashboard.html">Dashboard</a><a href="/admin.html">Admin</a>
 </nav></header>
 <main>
 <h1>Site admin</h1>
-<p class="note">Moderate streams, chat, products, orders and channels. Cancel / Refund (record) only change the record — no money moves. <b>Refund via Stripe</b> returns real money to the buyer's card for paid card orders, and restores the stock.</p>
+<p class="note">Moderate streams, chat, products, orders and channels. Cancel / Refund (record) only change the record — no money moves. <b>Refund via Stripe</b> returns real money to the buyer's card for paid card orders, and restores the stock. Refunding a paid break spot also frees the spot so it can be sold again.</p>
 
 <div class="card" id="gate">
 <h2>Enter admin passcode</h2>
@@ -25,6 +25,7 @@
 <div id="analytics"><p class="note">Loading…</p></div></div>
 
 <div class="card"><h2>Live streams</h2><div id="live"><p class="note">Loading…</p></div></div>
+<div class="card"><h2>🎲 Breaks</h2><p class="note">End a break to close it and its stream — the break page keeps its pulls. Removing a pull takes it off the break page.</p><div id="breaks"><p class="note">Loading…</p></div></div>
 <div class="card"><h2>Recent chat (all streams)</h2><div id="chat"><p class="note">Loading…</p></div></div>
 <div class="card"><h2>Products</h2><div id="products"><p class="note">Loading…</p></div></div>
 <div class="card"><h2>Orders</h2><div id="orders"><p class="note">Loading…</p></div></div>
@@ -79,6 +80,7 @@ async function loadAll() {
       ['Orders', s.orders], ['Cancelled / refunded', s.cancelled_orders],
       ['Revenue (active orders)', '$' + Number(s.revenue).toFixed(2)],
       ['Recordings', s.recordings || 0],
+      ['Breaks', s.breaks || 0], ['Spots sold', s.spots_sold || 0],
       ['Open problem reports', s.open_disputes || 0], ['Listing reports', s.listing_reports || 0],
       ['Total visits', s.total_visits], ['Unique visitors', s.unique_visitors], ['Visits today', s.visits_today],
     ].map(([k, v]) => `<div class="stat"><b>${v}</b><span>${k}</span></div>`).join('');
@@ -89,6 +91,22 @@ async function loadAll() {
 
     const live = await aapi('/api/admin/streams?status=live');
     $('#live').innerHTML = live.length ? `<div class="scroll-x"><table><tr><th>Stream</th><th>Channel</th><th>Viewers</th><th>Started</th><th></th></tr>${live.map(x => `<tr><td>${esc(x.title)}</td><td>${esc(x.channel_name)}</td><td>${x.viewer_count}</td><td>${new Date(x.created_at).toLocaleString()}</td><td><a href="/room.html?id=${x.id}">View</a> <button class="small danger" onclick="endStream(${x.id})">End</button> <button class="small danger" onclick="delStream(${x.id})">Remove</button></td></tr>`).join('')}</table></div>` : '<p class="note">No live streams right now.</p>';
+
+    const breaks = await aapi('/api/admin/breaks');
+    $('#breaks').innerHTML = breaks.length ? `<div class="scroll-x"><table><tr><th>Break</th><th>Channel</th><th>Category</th><th>Status</th><th>Spots sold</th><th>Pulls</th><th>Created</th><th></th></tr>${breaks.map(b => `<tr><td>${esc(b.title)}</td><td>${esc(b.channel_name)}</td><td>${esc(b.category)}</td><td>${esc(b.status)}</td><td>${b.spots_sold}/${b.spots_total}</td><td>${b.pulls_count || 0}</td><td>${new Date(b.created_at).toLocaleString()}</td><td><a href="/room.html?id=${b.stream_id}">View</a> ${b.status !== 'ended' ? `<button class="small danger" onclick="endBreak(${b.id})">End break</button>` : ''}</td></tr>`).join('')}</table></div>` : '<p class="note">No breaks yet.</p>';
+    // Pulls, with a remove button each — detail comes from the public
+    // break endpoint, which includes the pulls list.
+    const withPulls = breaks.filter(b => (b.pulls_count || 0) > 0);
+    if (withPulls.length) {
+      let pullsHtml = '<h3>Pulls</h3>';
+      for (const b of withPulls) {
+        try {
+          const detail = await aapi('/api/breaks/' + b.id);
+          pullsHtml += `<h3>${esc(b.title)}</h3>` + detail.pulls.map(p => `<p>🎉 ${esc(p.item)} → ${esc(p.spot_label || 'a spot')} <button class="small danger" onclick="delPull(${b.id},${p.id})">Remove pull</button></p>`).join('');
+        } catch (e) {}
+      }
+      $('#breaks').innerHTML += pullsHtml;
+    }
 
     const chat = await aapi('/api/admin/chat?limit=100');
     $('#chat').innerHTML = chat.length ? `<div class="scroll-x"><table><tr><th>Message</th><th>Author</th><th>Stream</th><th>When</th><th></th></tr>${chat.map(m => `<tr><td>${esc(m.text)}</td><td>${esc(m.author)}</td><td>${esc(m.stream_title || ('#' + m.stream_id))} — ${esc(m.channel_name || '')}</td><td>${new Date(m.created_at).toLocaleString()}</td><td><button class="small danger" onclick="delChat(${m.id})">Delete</button></td></tr>`).join('')}</table></div>` : '<p class="note">No chat messages yet.</p>';
@@ -127,6 +145,8 @@ async function loadAll() {
   } catch (e) { lock(); $('#gateMsg').textContent = 'Session ended: ' + e.message; }
 }
 async function endStream(id) { if (confirm('End this stream?')) { await aapi(`/api/admin/streams/${id}/end`, { method: 'POST' }); loadAll(); } }
+async function endBreak(id) { if (confirm('End this break? Its stream ends too, and the break page keeps the pulls.')) { await aapi(`/api/admin/breaks/${id}/end`, { method: 'POST' }); loadAll(); } }
+async function delPull(breakId, pullId) { if (confirm('Remove this pull from the break page?')) { await aapi(`/api/admin/breaks/${breakId}/pulls/${pullId}`, { method: 'DELETE' }); loadAll(); } }
 async function delStream(id) { if (confirm('Remove this stream and its chat history?')) { await aapi(`/api/admin/streams/${id}`, { method: 'DELETE' }); loadAll(); } }
 async function delChat(id) { await aapi(`/api/admin/chat/${id}`, { method: 'DELETE' }); loadAll(); }
 async function delProduct(id) { if (confirm('Remove this listing?')) { await aapi(`/api/admin/products/${id}`, { method: 'DELETE' }); loadAll(); } }

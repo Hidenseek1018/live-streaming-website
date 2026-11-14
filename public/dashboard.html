@@ -1,7 +1,7 @@
 <!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Dashboard — LiveStream</title><link rel="stylesheet" href="/style.css"><link rel="manifest" href="/manifest.json"><meta name="theme-color" content="#0c0e13"></head><body>
 <header><div class="logo">Live<span>Stream</span></div><nav>
-<a href="/">Discover</a><a href="/studio.html">Studio</a><a href="/dashboard.html">Dashboard</a><a href="/admin.html">Admin</a>
+<a href="/">Breaks</a><a href="/studio.html">Studio</a><a href="/dashboard.html">Dashboard</a><a href="/admin.html">Admin</a>
 </nav></header>
 <main>
 <h1>Dashboard</h1>
@@ -10,6 +10,8 @@
 <div class="card"><h2>Visitor analytics</h2>
 <p class="note">Simple first-party counts — every page load is one view, unique visitors are counted by a random cookie (no IP addresses stored, no third-party service).</p>
 <div id="analytics"><p class="note">Loading…</p></div></div>
+
+<div class="card"><h2>🎲 Your breaks</h2><div id="myBreaks"><p class="note">Loading…</p></div></div>
 
 <div class="card"><h2>Payment options</h2>
 <p class="note" id="payOptionsNote">Save nicknamed payment methods for checkout. Only the label and last 4 digits / handle are stored — never full card numbers. The default is pre-selected at checkout. No real charging happens anywhere in this app.</p>
@@ -67,6 +69,7 @@ async function load() {
     ['Viewers now', s.viewers], ['Live streams', s.live_streams], ['Total streams', s.total_streams],
     ['Listings', s.listings], ['Orders received', s.orders_received], ['Purchases', s.purchases],
     ['Revenue (recorded)', '$' + Number(s.revenue).toFixed(2)], ['Follows', s.follows],
+    ['Breaks', s.breaks], ['Spots sold', s.spots_sold],
     ['Total visits', s.total_visits], ['Unique visitors', s.unique_visitors], ['Visits today', s.visits_today],
   ].map(([k, v]) => `<div class="stat"><b>${v}</b><span>${k}</span></div>`).join('');
 
@@ -74,6 +77,14 @@ async function load() {
   $('#analytics').innerHTML =
     `<h3>Views per page</h3>` + (a.per_page.length ? `<div class="scroll-x"><table><tr><th>Page</th><th>Views</th></tr>${a.per_page.map(r => `<tr><td>${esc(PAGE_LABELS[r.path] || r.path)}</td><td>${r.views}</td></tr>`).join('')}</table></div>` : '<p class="note">No visits yet.</p>') +
     `<h3>Visits per day (last 30 days)</h3>` + (a.per_day.length ? `<div class="scroll-x"><table><tr><th>Day</th><th>Visits</th></tr>${a.per_day.map(r => `<tr><td>${esc(r.day)}</td><td>${r.views}</td></tr>`).join('')}</table></div>` : '<p class="note">No visits yet.</p>');
+
+  const breaks = await api('/api/breaks');
+  $('#myBreaks').innerHTML = breaks.length ? breaks.map(b => {
+    const badge = b.status === 'live' ? '<span class="live-badge">● LIVE</span>' : b.status === 'upcoming' ? '<span class="upcoming-badge">📅 UPCOMING</span>' : '<span class="ended-badge">🏆 FINISHED</span>';
+    return `<div class="row" style="justify-content:space-between;border-bottom:1px solid #2a2f3a;padding:8px 0">
+      <span>${badge} <b>${esc(b.title)}</b><br><span class="meta">${esc(b.channel_name)} · ${esc(b.category)}${b.opening ? ' · ' + esc(b.opening) : ''} · ${b.spots_sold}/${b.spots_total} spots sold · $${Number(b.spot_price).toFixed(2)}/spot${b.pulls_count ? ` · 🎉 ${b.pulls_count} pulls` : ''}</span></span>
+      <a href="/room.html?id=${b.stream_id}"><button class="small secondary">View break</button></a></div>`;
+  }).join('') : '<p class="note">No breaks yet — <a href="/studio.html">create one in the Studio</a>.</p>';
 
   const methods = await api('/api/payment-methods');
   $('#methods').innerHTML = methods.length ? methods.map(m => `<p>${esc(m.label)} — ${esc(m.kind)}${m.last4_or_handle ? ' •• ' + esc(m.last4_or_handle) : ''} ${m.is_default ? '<b class="ok">(default)</b>' : `<button class="small secondary" onclick="setDefault(${m.id})">Set default</button>`} <button class="small secondary" onclick="delMethod(${m.id})">Remove</button></p>`).join('') : '<p class="note">No saved methods yet.</p>';
@@ -100,7 +111,7 @@ async function load() {
   $('#history').innerHTML = streams.length ? streams.map(s => `<p><span class="${s.status === 'live' ? 'live-badge' : 'ended-badge'}">${s.status.toUpperCase()}</span> <b>${esc(s.title)}</b> — ${esc(s.channel_name)} · ${esc(s.category)} · 👁 ${s.viewer_count} · ${new Date(s.created_at).toLocaleString()} ${s.status === 'live' ? `<a href="/room.html?id=${s.id}">Watch</a>` : ''}</p>`).join('') : '<p class="note">No streams yet.</p>';
 
   const recs = await api('/api/recordings');
-  $('#recordings').innerHTML = recs.length ? `<div class="scroll-x"><table><tr><th>Recording</th><th>Channel</th><th>Length</th><th>Size</th><th>Recorded</th><th></th></tr>${recs.map(r => `<tr><td>${esc(r.title || 'Untitled stream')}</td><td>${esc(r.channel_name)}</td><td>${fmtDuration(r.duration_seconds)}</td><td>${fmtSize(r.size_bytes)}</td><td>${new Date(r.created_at).toLocaleString()}</td><td><a href="/replay.html?id=${r.id}">Watch</a> <button class="small danger" onclick="delRecording(${r.id})">Delete</button></td></tr>`).join('')}</table></div>` : '<p class="note">No recordings yet — record a live from the Studio.</p>';
+  $('#recordings').innerHTML = recs.length ? `<div class="scroll-x"><table><tr><th>Recording</th><th>Channel</th><th>Length</th><th>Size</th><th>Recorded</th><th></th></tr>${recs.map(r => { const br = breaks.find(b => b.stream_id === r.stream_id); return `<tr><td>${esc(r.title || 'Untitled stream')}${br ? ' 🎲' : ''}</td><td>${esc(r.channel_name)}</td><td>${fmtDuration(r.duration_seconds)}</td><td>${fmtSize(r.size_bytes)}</td><td>${new Date(r.created_at).toLocaleString()}</td><td><a href="/replay.html?id=${r.id}">Watch</a> <button class="small danger" onclick="delRecording(${r.id})">Delete</button></td></tr>`; }).join('')}</table></div>` : '<p class="note">No recordings yet — record a live from the Studio.</p>';
 
   const follows = await api('/api/follows');
   $('#follows').innerHTML = follows.length ? follows.map(f => `<p>${esc(f.channel)} <button class="small secondary" onclick="unfollow('${esc(f.channel)}')">Unfollow</button></p>`).join('') : '<p class="note">You are not following anyone yet.</p>';

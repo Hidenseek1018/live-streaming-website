@@ -34,6 +34,9 @@ function displayName() {
   return n;
 }
 const CATEGORIES = ['Gaming', 'Music', 'Shopping', 'Talk', 'Sports', 'Cooking', 'Other'];
+// Memorabilia categories for live breaks — cards, autographs, jerseys,
+// balls & equipment, game-used gear, and anything else sports.
+const BREAK_CATEGORIES = ['Cards', 'Autographs', 'Jerseys', 'Balls & Equipment', 'Game-Used', 'Other'];
 const ONE_TIME_METHODS = ['Card', 'PayPal', 'Apple Pay', 'Google Pay', 'Cash App', 'Bank transfer'];
 // Shared formatting for recordings (replays): "12:34" / "1:02:03", "4.2 MB".
 function fmtDuration(sec) {

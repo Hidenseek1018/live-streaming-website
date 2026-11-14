@@ -144,6 +144,39 @@ CREATE TABLE IF NOT EXISTS listing_reports (
   note TEXT NOT NULL DEFAULT '',
   created_at INTEGER NOT NULL
 );
+-- Live breaks (sports memorabilia): a break is a live stream with spots
+-- and pulls. The host opens packs/boxes on camera; each spot is a product
+-- (stock 1) bought through the normal checkout, and each pull is an item
+-- the host assigns to a spot during the live. status: upcoming | live | ended.
+CREATE TABLE IF NOT EXISTS breaks (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  stream_id INTEGER,
+  channel_name TEXT NOT NULL,
+  title TEXT NOT NULL,
+  category TEXT NOT NULL DEFAULT 'Cards',
+  opening TEXT NOT NULL DEFAULT '',
+  spot_price REAL NOT NULL,
+  status TEXT NOT NULL DEFAULT 'upcoming',
+  created_at INTEGER NOT NULL,
+  ended_at INTEGER
+);
+CREATE TABLE IF NOT EXISTS break_spots (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  break_id INTEGER NOT NULL,
+  product_id INTEGER NOT NULL,
+  label TEXT NOT NULL,
+  position INTEGER NOT NULL DEFAULT 0,
+  status TEXT NOT NULL DEFAULT 'available',
+  buyer TEXT NOT NULL DEFAULT '',
+  order_id INTEGER
+);
+CREATE TABLE IF NOT EXISTS break_pulls (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  break_id INTEGER NOT NULL,
+  spot_id INTEGER NOT NULL,
+  item TEXT NOT NULL,
+  created_at INTEGER NOT NULL
+);
 -- Visitor analytics (simple, first-party only — no third-party service).
 -- visitors: one row per random visitor cookie (no raw IPs stored anywhere).
 -- page_views: one row per HTML page load.
@@ -208,6 +241,66 @@ function likeCount(streamId) {
 }
 function withViewers(s) {
   return s ? { ...s, viewer_count: viewerCount(s.id), like_count: likeCount(s.id) } : null;
+}
+
+// ---- Breaks (live sports-memorabilia breaks) ----
+// Memorabilia categories for breaks — separate from the stream categories
+// (Gaming, Music, …) used by plain streams.
+const BREAK_CATEGORIES = ['Cards', 'Autographs', 'Jerseys', 'Balls & Equipment', 'Game-Used', 'Other'];
+function breakCounts(breakId) {
+  const total = db.prepare('SELECT COUNT(*) c FROM break_spots WHERE break_id=?').get(breakId).c;
+  const sold = db.prepare("SELECT COUNT(*) c FROM break_spots WHERE break_id=? AND status='sold'").get(breakId).c;
+  const pulls = db.prepare('SELECT COUNT(*) c FROM break_pulls WHERE break_id=?').get(breakId).c;
+  return { spots_total: total, spots_sold: sold, pulls_count: pulls };
+}
+function breakPublic(b) {
+  if (!b) return null;
+  return {
+    id: b.id, stream_id: b.stream_id, channel_name: b.channel_name, title: b.title,
+    category: b.category, opening: b.opening, spot_price: b.spot_price, status: b.status,
+    created_at: b.created_at, ended_at: b.ended_at, ...breakCounts(b.id),
+  };
+}
+function breakWithDetail(b) {
+  const out = breakPublic(b);
+  out.spots = db.prepare(
+    `SELECT bs.*, pr.price, pr.stock FROM break_spots bs
+     LEFT JOIN products pr ON pr.id=bs.product_id
+     WHERE bs.break_id=? ORDER BY bs.position ASC`
+  ).all(b.id).map((s) => ({
+    id: s.id, label: s.label, position: s.position, status: s.status,
+    buyer: s.buyer, order_id: s.order_id, product_id: s.product_id,
+    price: s.price, stock: s.stock,
+  }));
+  out.pulls = db.prepare(
+    `SELECT bp.*, bs.label AS spot_label FROM break_pulls bp
+     LEFT JOIN break_spots bs ON bs.id=bp.spot_id
+     WHERE bp.break_id=? ORDER BY bp.id ASC`
+  ).all(b.id);
+  return out;
+}
+// Attach the break (if any) to each stream row, in one batched query.
+function attachBreaks(rows) {
+  if (!rows.length) return rows;
+  const ids = rows.map((r) => r.id);
+  const q = ids.map(() => '?').join(',');
+  const breaks = db.prepare(`SELECT * FROM breaks WHERE stream_id IN (${q})`).all(...ids);
+  const byStream = new Map();
+  for (const b of breaks) byStream.set(b.stream_id, breakPublic(b));
+  return rows.map((r) => ({ ...r, break: byStream.get(r.id) || null }));
+}
+// When a stream ends (host, admin, or channel block), its break ends too.
+function endBreakForStream(streamId) {
+  db.prepare("UPDATE breaks SET status='ended', ended_at=? WHERE stream_id=? AND status != 'ended'").run(now(), streamId);
+}
+// Frees the spot linked to an order (refund/cancel): the spot goes back on
+// sale. Does NOT touch stock — callers that already restored stock (the
+// Stripe refund handler) must not double-restore it.
+function freeSpot(orderId) {
+  const spot = db.prepare('SELECT * FROM break_spots WHERE order_id=?').get(orderId);
+  if (!spot) return null;
+  db.prepare("UPDATE break_spots SET status='available', buyer='', order_id=NULL WHERE id=?").run(spot.id);
+  return spot;
 }
 function sendJson(res, status, obj) {
   const body = JSON.stringify(obj);
@@ -467,11 +560,14 @@ const server = http.createServer(async (req, res) => {
         const recordings = db.prepare('SELECT COUNT(*) c FROM recordings').get().c;
         const openDisputes = db.prepare("SELECT COUNT(*) c FROM disputes WHERE status='open'").get().c;
         const listingReports = db.prepare('SELECT COUNT(*) c FROM listing_reports').get().c;
+        const breaks = db.prepare('SELECT COUNT(*) c FROM breaks').get().c;
+        const spotsSold = db.prepare("SELECT COUNT(*) c FROM break_spots WHERE status='sold'").get().c;
         return sendJson(res, 200, {
           live_streams: live, total_streams: totalStreams, channels, blocked_channels: blocked,
           products: listings, orders, cancelled_orders: cancelled, revenue: Number(revenue), viewers,
           recordings, stripe_enabled: stripeEnabled(),
           open_disputes: openDisputes, listing_reports: listingReports,
+          breaks, spots_sold: spotsSold,
           ...analyticsSummary(),
         });
       }
@@ -488,6 +584,7 @@ const server = http.createServer(async (req, res) => {
         db.prepare('UPDATE streams SET status=?, ended_at=? WHERE id=?').run('ended', now(), id);
         db.prepare('DELETE FROM signals WHERE stream_id=?').run(id);
         db.prepare('DELETE FROM viewers WHERE stream_id=?').run(id);
+        endBreakForStream(id);
         const s = db.prepare('SELECT * FROM streams WHERE id=?').get(id);
         return s ? sendJson(res, 200, withViewers(s)) : sendJson(res, 404, { error: 'stream not found' });
       }
@@ -499,6 +596,20 @@ const server = http.createServer(async (req, res) => {
         db.prepare('DELETE FROM chat_messages WHERE stream_id=?').run(id);
         db.prepare('DELETE FROM signals WHERE stream_id=?').run(id);
         db.prepare('DELETE FROM viewers WHERE stream_id=?').run(id);
+        // A deleted stream takes its break with it: pulls and spots go,
+        // spot products with no orders go too; spot products that were
+        // bought stay as plain listings so their orders keep working.
+        const br = db.prepare('SELECT * FROM breaks WHERE stream_id=?').get(id);
+        if (br) {
+          const spotProducts = db.prepare('SELECT product_id FROM break_spots WHERE break_id=?').all(br.id).map((r) => r.product_id);
+          db.prepare('DELETE FROM break_pulls WHERE break_id=?').run(br.id);
+          db.prepare('DELETE FROM break_spots WHERE break_id=?').run(br.id);
+          db.prepare('DELETE FROM breaks WHERE id=?').run(br.id);
+          for (const pid of spotProducts) {
+            const hasOrder = db.prepare('SELECT 1 FROM orders WHERE product_id=?').get(pid);
+            if (!hasOrder) db.prepare('DELETE FROM products WHERE id=?').run(pid);
+          }
+        }
         db.prepare('UPDATE products SET stream_id=NULL WHERE stream_id=?').run(id);
         db.prepare('DELETE FROM streams WHERE id=?').run(id);
         return sendJson(res, 200, { ok: true });
@@ -521,7 +632,7 @@ const server = http.createServer(async (req, res) => {
       // Products: list / remove (with how many times each listing was reported)
       if (p === '/api/admin/products' && req.method === 'GET') {
         return sendJson(res, 200, db.prepare(
-          'SELECT *, (SELECT COUNT(*) FROM listing_reports WHERE product_id=products.id) AS report_count FROM products ORDER BY created_at DESC'
+          'SELECT *, (SELECT COUNT(*) FROM listing_reports WHERE product_id=products.id) AS report_count, EXISTS(SELECT 1 FROM break_spots WHERE product_id=products.id) AS is_spot FROM products ORDER BY created_at DESC'
         ).all());
       }
       const adminDelProduct = p.match(/^\/api\/admin\/products\/(\d+)$/);
@@ -547,6 +658,13 @@ const server = http.createServer(async (req, res) => {
         const o = db.prepare('SELECT * FROM orders WHERE id=?').get(adminOrderStatus[1]);
         if (!o) return sendJson(res, 404, { error: 'order not found' });
         db.prepare('UPDATE orders SET status=? WHERE id=?').run(status, o.id);
+        // A cancelled/refunded spot order frees its spot (and restores the
+        // spot product's stock) so the spot can be sold again. Regular
+        // record-only orders are untouched — only their record changes.
+        if (status !== 'placed') {
+          const spot = freeSpot(o.id);
+          if (spot) db.prepare('UPDATE products SET stock = stock + 1 WHERE id=?').run(spot.product_id);
+        }
         return sendJson(res, 200, db.prepare('SELECT * FROM orders WHERE id=?').get(o.id));
       }
 
@@ -584,6 +702,9 @@ const server = http.createServer(async (req, res) => {
         try {
           db.prepare("UPDATE orders SET status='refunded', payment_status='refunded', stripe_refund_id=? WHERE id=?").run(refund.id, o.id);
           db.prepare('UPDATE products SET stock = stock + 1 WHERE id=?').run(o.product_id);
+          // A refunded spot goes back on sale (stock was restored above,
+          // so freeSpot must not touch stock again).
+          freeSpot(o.id);
           db.exec('COMMIT');
         } catch (e) { db.exec('ROLLBACK'); throw e; }
         const updated = db.prepare('SELECT * FROM orders WHERE id=?').get(o.id);
@@ -648,6 +769,7 @@ const server = http.createServer(async (req, res) => {
           db.prepare('UPDATE streams SET status=?, ended_at=? WHERE id=?').run('ended', now(), s.id);
           db.prepare('DELETE FROM signals WHERE stream_id=?').run(s.id);
           db.prepare('DELETE FROM viewers WHERE stream_id=?').run(s.id);
+          endBreakForStream(s.id);
         }
         return sendJson(res, 200, { ok: true, channel, ended_streams: live.length });
       }
@@ -668,6 +790,31 @@ const server = http.createServer(async (req, res) => {
         if (!rec) return sendJson(res, 404, { error: 'recording not found' });
         db.prepare('DELETE FROM recordings WHERE id=?').run(rec.id);
         fs.unlink(path.join(RECORDINGS_DIR, rec.filename), () => {});
+        return sendJson(res, 200, { ok: true });
+      }
+
+      // Breaks: list / end one / delete a pull. Ending a break also ends
+      // its stream; deleting a pull removes the record (the host can also
+      // remove pulls from the Studio — there are no accounts, so this is
+      // the admin's control over what a break page shows).
+      if (p === '/api/admin/breaks' && req.method === 'GET') {
+        return sendJson(res, 200, db.prepare('SELECT * FROM breaks ORDER BY created_at DESC LIMIT 200').all().map(breakPublic));
+      }
+      const adminEndBreak = p.match(/^\/api\/admin\/breaks\/(\d+)\/end$/);
+      if (adminEndBreak && req.method === 'POST') {
+        const br = db.prepare('SELECT * FROM breaks WHERE id=?').get(adminEndBreak[1]);
+        if (!br) return sendJson(res, 404, { error: 'break not found' });
+        if (br.stream_id) {
+          db.prepare('UPDATE streams SET status=?, ended_at=? WHERE id=?').run('ended', now(), br.stream_id);
+          db.prepare('DELETE FROM signals WHERE stream_id=?').run(br.stream_id);
+          db.prepare('DELETE FROM viewers WHERE stream_id=?').run(br.stream_id);
+        }
+        db.prepare("UPDATE breaks SET status='ended', ended_at=? WHERE id=?").run(now(), br.id);
+        return sendJson(res, 200, breakPublic(db.prepare('SELECT * FROM breaks WHERE id=?').get(br.id)));
+      }
+      const adminDelPull = p.match(/^\/api\/admin\/breaks\/(\d+)\/pulls\/(\d+)$/);
+      if (adminDelPull && req.method === 'DELETE') {
+        db.prepare('DELETE FROM break_pulls WHERE id=? AND break_id=?').run(adminDelPull[2], adminDelPull[1]);
         return sendJson(res, 200, { ok: true });
       }
 
@@ -766,7 +913,7 @@ const server = http.createServer(async (req, res) => {
       if (status) rows = rows.filter((r) => r.status === status);
       if (category && category !== 'All') rows = rows.filter((r) => r.category === category);
       if (q) rows = rows.filter((r) => (r.title + ' ' + r.channel_name).toLowerCase().includes(q));
-      return sendJson(res, 200, rows.map(withViewers));
+      return sendJson(res, 200, attachBreaks(rows.map(withViewers)));
     }
     if (p === '/api/streams' && req.method === 'POST') {
       if (!requireAge(req, res)) return;
@@ -781,7 +928,7 @@ const server = http.createServer(async (req, res) => {
     const streamMatch = p.match(/^\/api\/streams\/(\d+)$/);
     if (streamMatch && req.method === 'GET') {
       const s = db.prepare('SELECT * FROM streams WHERE id=?').get(streamMatch[1]);
-      return s ? sendJson(res, 200, withViewers(s)) : sendJson(res, 404, { error: 'stream not found' });
+      return s ? sendJson(res, 200, attachBreaks([withViewers(s)])[0]) : sendJson(res, 404, { error: 'stream not found' });
     }
     const endMatch = p.match(/^\/api\/streams\/(\d+)\/end$/);
     if (endMatch && req.method === 'POST') {
@@ -789,6 +936,7 @@ const server = http.createServer(async (req, res) => {
       db.prepare('UPDATE streams SET status=?, ended_at=? WHERE id=?').run('ended', now(), id);
       db.prepare('DELETE FROM signals WHERE stream_id=?').run(id);
       db.prepare('DELETE FROM viewers WHERE stream_id=?').run(id);
+      endBreakForStream(id);
       const s = db.prepare('SELECT * FROM streams WHERE id=?').get(id);
       return s ? sendJson(res, 200, withViewers(s)) : sendJson(res, 404, { error: 'stream not found' });
     }
@@ -802,6 +950,119 @@ const server = http.createServer(async (req, res) => {
       db.prepare('INSERT INTO viewers (stream_id, peer_id, last_seen) VALUES (?,?,?) ON CONFLICT(stream_id, peer_id) DO UPDATE SET last_seen=excluded.last_seen')
         .run(id, peer, now());
       return sendJson(res, 200, { viewer_count: viewerCount(id) });
+    }
+
+    // ---- Breaks (live sports-memorabilia breaks) ----
+    // A break is created with its stream up front (status 'upcoming') so
+    // the room exists before the live starts and spots can be bought early.
+    // Each spot is a normal product (stock 1) bought through the existing
+    // checkout — Stripe or record-only — so there is no second payment path.
+    if (p === '/api/breaks' && req.method === 'GET') {
+      const status = u.searchParams.get('status');
+      const category = u.searchParams.get('category');
+      const streamId = u.searchParams.get('stream_id');
+      let rows = db.prepare('SELECT * FROM breaks ORDER BY created_at DESC').all();
+      if (status) rows = rows.filter((r) => r.status === status);
+      if (category && category !== 'All') rows = rows.filter((r) => r.category === category);
+      if (streamId) rows = rows.filter((r) => r.stream_id === Number(streamId));
+      return sendJson(res, 200, rows.map(breakPublic));
+    }
+    if (p === '/api/breaks' && req.method === 'POST') {
+      if (!requireAge(req, res)) return;
+      const b = await readBody(req);
+      const channel = esc(b.channel_name), title = esc(b.title);
+      if (!channel || !title) return sendJson(res, 400, { error: 'channel_name and title are required' });
+      const category = b.category;
+      if (!BREAK_CATEGORIES.includes(category)) return sendJson(res, 400, { error: 'category must be one of: ' + BREAK_CATEGORIES.join(', ') });
+      const opening = esc(b.opening || '').slice(0, 200);
+      const price = Number(b.spot_price);
+      if (!(price > 0)) return sendJson(res, 400, { error: 'spot_price must be above $0' });
+      let labels = Array.isArray(b.labels) ? b.labels.map((x) => esc(x)).filter(Boolean) : [];
+      if (!labels.length) {
+        const count = Math.min(100, Math.max(0, parseInt(b.spot_count, 10) || 0));
+        if (!count) return sendJson(res, 400, { error: 'spot_count or labels are required' });
+        labels = Array.from({ length: count }, (_, i) => 'Spot ' + (i + 1));
+      }
+      if (labels.length > 100) return sendJson(res, 400, { error: 'at most 100 spots per break' });
+      const blocked = db.prepare('SELECT 1 FROM blocked_channels WHERE LOWER(channel)=LOWER(?)').get(channel);
+      if (blocked) return sendJson(res, 403, { error: 'this channel is blocked from going live' });
+      db.exec('BEGIN IMMEDIATE');
+      let br;
+      try {
+        const sr = db.prepare('INSERT INTO streams (channel_name,title,category,status,created_at) VALUES (?,?,?,?,?)')
+          .run(channel, title, category, 'upcoming', now());
+        const streamId = sr.lastInsertRowid;
+        const r = db.prepare('INSERT INTO breaks (stream_id,channel_name,title,category,opening,spot_price,status,created_at) VALUES (?,?,?,?,?,?,?,?)')
+          .run(streamId, channel, title, category, opening, price, 'upcoming', now());
+        br = db.prepare('SELECT * FROM breaks WHERE id=?').get(r.lastInsertRowid);
+        labels.forEach((label, i) => {
+          const pr = db.prepare('INSERT INTO products (name, price, stock, stream_id, created_at) VALUES (?,?,?,?,?)')
+            .run(`${title} · ${label}`, price, 1, streamId, now());
+          db.prepare('INSERT INTO break_spots (break_id, product_id, label, position, status) VALUES (?,?,?,?,?)')
+            .run(br.id, pr.lastInsertRowid, label, i, 'available');
+        });
+        db.exec('COMMIT');
+      } catch (e) { db.exec('ROLLBACK'); throw e; }
+      return sendJson(res, 201, breakWithDetail(br));
+    }
+    const breakMatch = p.match(/^\/api\/breaks\/(\d+)$/);
+    if (breakMatch && req.method === 'GET') {
+      const br = db.prepare('SELECT * FROM breaks WHERE id=?').get(breakMatch[1]);
+      return br ? sendJson(res, 200, breakWithDetail(br)) : sendJson(res, 404, { error: 'break not found' });
+    }
+    // Going live on a break flips its stream from 'upcoming' to 'live'.
+    // The Studio then starts its normal live panel on that stream.
+    const breakGoLive = p.match(/^\/api\/breaks\/(\d+)\/go-live$/);
+    if (breakGoLive && req.method === 'POST') {
+      if (!requireAge(req, res)) return;
+      const br = db.prepare('SELECT * FROM breaks WHERE id=?').get(breakGoLive[1]);
+      if (!br) return sendJson(res, 404, { error: 'break not found' });
+      if (br.status !== 'upcoming') return sendJson(res, 400, { error: 'this break is not upcoming' });
+      const s = db.prepare('SELECT * FROM streams WHERE id=?').get(br.stream_id);
+      if (!s || s.status !== 'upcoming') return sendJson(res, 400, { error: 'this break has no upcoming stream' });
+      db.prepare("UPDATE streams SET status='live' WHERE id=?").run(s.id);
+      db.prepare("UPDATE breaks SET status='live' WHERE id=?").run(br.id);
+      return sendJson(res, 200, withViewers(db.prepare('SELECT * FROM streams WHERE id=?').get(s.id)));
+    }
+    // Pulls: what the host pulled, and which spot it goes to. The host
+    // enters them live from the Studio — there are no accounts, so this is
+    // a convention (like recording delete): the admin can remove a pull.
+    const breakPulls = p.match(/^\/api\/breaks\/(\d+)\/pulls$/);
+    if (breakPulls && req.method === 'GET') {
+      const br = db.prepare('SELECT * FROM breaks WHERE id=?').get(breakPulls[1]);
+      if (!br) return sendJson(res, 404, { error: 'break not found' });
+      const rows = db.prepare(
+        `SELECT bp.*, bs.label AS spot_label FROM break_pulls bp
+         LEFT JOIN break_spots bs ON bs.id=bp.spot_id
+         WHERE bp.break_id=? ORDER BY bp.id ASC`
+      ).all(br.id);
+      return sendJson(res, 200, rows);
+    }
+    if (breakPulls && req.method === 'POST') {
+      if (!requireAge(req, res)) return;
+      const br = db.prepare('SELECT * FROM breaks WHERE id=?').get(breakPulls[1]);
+      if (!br) return sendJson(res, 404, { error: 'break not found' });
+      const b = await readBody(req);
+      const spotId = Number(b.spot_id);
+      const item = esc(b.item || '').slice(0, 300);
+      if (!item) return sendJson(res, 400, { error: 'item is required' });
+      const spot = db.prepare('SELECT * FROM break_spots WHERE id=? AND break_id=?').get(spotId, br.id);
+      if (!spot) return sendJson(res, 400, { error: 'spot does not belong to this break' });
+      const r = db.prepare('INSERT INTO break_pulls (break_id, spot_id, item, created_at) VALUES (?,?,?,?)')
+        .run(br.id, spot.id, item, now());
+      const row = db.prepare(
+        `SELECT bp.*, bs.label AS spot_label FROM break_pulls bp
+         LEFT JOIN break_spots bs ON bs.id=bp.spot_id WHERE bp.id=?`
+      ).get(r.lastInsertRowid);
+      return sendJson(res, 201, row);
+    }
+    const breakPullDel = p.match(/^\/api\/breaks\/(\d+)\/pulls\/(\d+)$/);
+    if (breakPullDel && req.method === 'DELETE') {
+      if (!requireAge(req, res)) return;
+      const br = db.prepare('SELECT * FROM breaks WHERE id=?').get(breakPullDel[1]);
+      if (!br) return sendJson(res, 404, { error: 'break not found' });
+      db.prepare('DELETE FROM break_pulls WHERE id=? AND break_id=?').run(breakPullDel[2], br.id);
+      return sendJson(res, 200, { ok: true });
     }
 
     // Chat
@@ -820,12 +1081,18 @@ const server = http.createServer(async (req, res) => {
     }
 
     // Products
+    // Spot products (break spots) are hidden by default — they are bought
+    // from the break's spots grid, not the generic shop. Pass ?spots=1 to
+    // include them (the room's spot grid uses /api/breaks instead).
     if (p === '/api/products' && req.method === 'GET') {
       const sid = u.searchParams.get('stream_id');
-      const rows = sid
-        ? db.prepare('SELECT * FROM products WHERE stream_id=? ORDER BY created_at DESC').all(sid)
-        : db.prepare('SELECT * FROM products ORDER BY created_at DESC').all();
-      return sendJson(res, 200, rows);
+      const includeSpots = u.searchParams.get('spots') === '1';
+      const where = [];
+      const args = [];
+      if (sid) { where.push('stream_id=?'); args.push(sid); }
+      if (!includeSpots) where.push('NOT EXISTS (SELECT 1 FROM break_spots bs WHERE bs.product_id = products.id)');
+      const sql = 'SELECT * FROM products' + (where.length ? ' WHERE ' + where.join(' AND ') : '') + ' ORDER BY created_at DESC';
+      return sendJson(res, 200, db.prepare(sql).all(...args));
     }
     if (p === '/api/products' && req.method === 'POST') {
       if (!requireAge(req, res)) return;
@@ -859,6 +1126,10 @@ const server = http.createServer(async (req, res) => {
         const r = db.prepare('INSERT INTO orders (product_id, stream_id, buyer, payment_method, amount, created_at) VALUES (?,?,?,?,?,?)')
           .run(product.id, b.stream_id ? Number(b.stream_id) : product.stream_id, esc(b.buyer) || 'Anonymous', method, product.price, now());
         order = db.prepare('SELECT * FROM orders WHERE id=?').get(r.lastInsertRowid);
+        // A bought spot is sold the moment the order is placed — a
+        // record-only order is final, there is no payment to wait for.
+        db.prepare("UPDATE break_spots SET status='sold', buyer=?, order_id=? WHERE product_id=? AND status='available'")
+          .run(order.buyer, order.id, product.id);
         db.exec('COMMIT');
       } catch (e) { db.exec('ROLLBACK'); throw e; }
       return sendJson(res, 201, { ...order, product_name: product.name, remaining_stock: product.stock - 1 });
@@ -927,6 +1198,11 @@ const server = http.createServer(async (req, res) => {
       const paid = session && session.payment_status === 'paid';
       if (paid && order.payment_status !== 'paid') {
         db.prepare("UPDATE orders SET payment_status='paid' WHERE id=?").run(order.id);
+        // The spot only becomes sold once Stripe confirms the payment —
+        // an unpaid session must not claim it (stock was already taken
+        // when the session was created, so a held spot shows as "Held").
+        db.prepare("UPDATE break_spots SET status='sold', buyer=?, order_id=? WHERE product_id=? AND status='available'")
+          .run(order.buyer, order.id, order.product_id);
       }
       const updated = db.prepare('SELECT * FROM orders WHERE id=?').get(order.id);
       return sendJson(res, 200, { paid, payment_status: session.payment_status || 'unknown', order: updated });
@@ -1042,9 +1318,12 @@ const server = http.createServer(async (req, res) => {
       const revenue = db.prepare('SELECT COALESCE(SUM(amount),0) s FROM orders').get().s;
       const follows = db.prepare('SELECT COUNT(*) c FROM follows').get().c;
       const viewers = db.prepare('SELECT COUNT(*) c FROM viewers WHERE last_seen>?').get(now() - VIEWER_TTL_MS).c;
+      const breaks = db.prepare('SELECT COUNT(*) c FROM breaks').get().c;
+      const spotsSold = db.prepare("SELECT COUNT(*) c FROM break_spots WHERE status='sold'").get().c;
       return sendJson(res, 200, {
         live_streams: live, total_streams: totalStreams, viewers, listings,
         orders_received: orders, purchases: orders, revenue: Number(revenue), follows,
+        breaks, spots_sold: spotsSold,
         ...analyticsSummary(),
       });
     }

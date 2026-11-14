@@ -1,7 +1,7 @@
 <!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Studio — Go Live</title><link rel="stylesheet" href="/style.css"><link rel="manifest" href="/manifest.json"><meta name="theme-color" content="#0c0e13"></head><body>
 <header><div class="logo">Live<span>Stream</span></div><nav>
-<a href="/">Discover</a><a href="/studio.html">Studio</a><a href="/dashboard.html">Dashboard</a><a href="/admin.html">Admin</a>
+<a href="/">Breaks</a><a href="/studio.html">Studio</a><a href="/dashboard.html">Dashboard</a><a href="/admin.html">Admin</a>
 </nav><span class="live-pill" id="headerLivePill">● LIVE</span></header>
 <main>
 <h1>Studio</h1>
@@ -38,6 +38,35 @@
       <p class="note" id="camNote"></p>
     </div>
   </div>
+</div>
+
+<div class="card" id="breakCard">
+  <h2 style="margin-top:0">🎲 Create a break</h2>
+  <p class="note">Run a live break for sports memorabilia — cards, autographs, jerseys, game-used gear, anything sports. Set it up here, sell the spots, then go live and open the box on camera. Each spot buys a chance at what gets pulled.</p>
+  <div class="row">
+    <input id="bChannel" placeholder="Channel name" style="flex:1;min-width:160px" autocomplete="off">
+    <input id="bTitle" placeholder="Break title — e.g. 2024 Prizm Hobby Box break" style="flex:2;min-width:220px" autocomplete="off">
+  </div>
+  <div class="row">
+    <select id="bCategory" style="flex:1;min-width:150px"></select>
+    <input id="bOpening" placeholder="What's being opened — e.g. 2024 Prizm Hobby Box" style="flex:2;min-width:220px">
+  </div>
+  <div class="row">
+    <input id="bPrice" type="number" min="0.01" step="0.01" placeholder="Price per spot ($)" style="flex:1;min-width:130px">
+    <input id="bCount" type="number" min="1" max="100" step="1" placeholder="Number of spots" style="flex:1;min-width:130px">
+  </div>
+  <label>Spot labels — one per line (team names for card breaks, or leave blank for Spot 1, Spot 2…)</label>
+  <textarea id="bLabels" rows="3" placeholder="Lakers&#10;Celtics&#10;Bulls&#10;…"></textarea>
+  <div class="row">
+    <button id="createBreakBtn" onclick="createBreak()">🎲 Create break</button>
+    <span id="breakMsg" class="note"></span>
+  </div>
+  <p class="note">Spots go on sale as soon as the break is created — viewers can buy before you go live. The room link works right away.</p>
+</div>
+
+<div class="card" id="myBreaksCard">
+  <h2 style="margin-top:0">Your breaks</h2>
+  <div id="myBreaks"><p class="note">Loading…</p></div>
 </div>
 
 <div class="card" id="livePanel" style="display:none">
@@ -77,6 +106,17 @@
       <label class="ack" id="sellerAckLabel"><input type="checkbox" id="ackSeller"> I agree to the <a href="/sales-policy.html" target="_blank">Seller &amp; Sales Policy</a> — no real money is charged through this site yet.</label>
     </div>
   </div>
+  <div id="pullsSection" style="display:none">
+    <h3 style="margin-top:18px">🎲 Pulls — what came out of the break</h3>
+    <p class="note">Record each pull as it happens — pick the spot it goes to and describe the item. Pulls show on the break page live and stay there after the break ends.</p>
+    <div id="breakSpotsLine" class="note"></div>
+    <div class="row">
+      <select id="pullSpot" style="flex:1;min-width:160px"></select>
+      <input id="pullItem" placeholder="What was pulled? — e.g. Gold Prizm Wemby" style="flex:2;min-width:220px">
+      <button class="small" onclick="addPull()">Record pull</button>
+    </div>
+    <div id="pullsList"></div>
+  </div>
 </div>
 </main>
 <footer>
@@ -87,7 +127,10 @@
 <script>
 const catSel = $('#category');
 CATEGORIES.forEach(c => { const o = document.createElement('option'); o.textContent = c; catSel.appendChild(o); });
+const bCatSel = $('#bCategory');
+BREAK_CATEGORIES.forEach(c => { const o = document.createElement('option'); o.textContent = c; bCatSel.appendChild(o); });
 let localStream = null, streamId = null, pcs = {}, signalSince = 0, pollTimer = null, chatTimer = null;
+let liveChannel = '', liveBreakId = null;
 const HOST_ID = 'host';
 
 function setPreviewVisible(on) {
@@ -118,6 +161,31 @@ async function preview() {
 }
 $('#previewBtn').onclick = preview;
 
+// Shared live-panel startup: used both by the plain "Go live" button and
+// by "Go live on this break" (which creates the stream via the break API).
+function startLivePanel(s) {
+  streamId = s.id;
+  liveChannel = s.channel_name;
+  $('#setup').style.display = 'none';
+  $('#breakCard').style.display = 'none';
+  $('#myBreaksCard').style.display = 'none';
+  $('#livePanel').style.display = 'block';
+  $('#liveTitle').textContent = s.title + ' — ' + s.channel_name;
+  if (localStream) {
+    $('#liveLocalVideo').srcObject = localStream;
+  }
+  const roomA = $('#roomLink');
+  roomA.href = '/room.html?id=' + streamId;
+  const pill = $('#headerLivePill');
+  if (pill) pill.classList.add('show');
+  signalSince = 0;
+  pollTimer = setInterval(pollSignals, 1500);
+  chatTimer = setInterval(loadChatSales, 3000);
+  loadChatSales();
+  loadBreakForLive();
+  toast('You are live!', 'ok');
+}
+
 $('#goLiveBtn').onclick = async () => {
   const channel = $('#channel').value.trim(), title = $('#title').value.trim();
   if (!channel || !title) {
@@ -131,22 +199,7 @@ $('#goLiveBtn').onclick = async () => {
   try {
     if (!localStream) await preview();
     const s = await api('/api/streams', { method: 'POST', body: JSON.stringify({ channel_name: channel, title, category: catSel.value }) });
-    streamId = s.id;
-    $('#setup').style.display = 'none';
-    $('#livePanel').style.display = 'block';
-    $('#liveTitle').textContent = s.title + ' — ' + s.channel_name;
-    if (localStream) {
-      $('#liveLocalVideo').srcObject = localStream;
-    }
-    const roomA = $('#roomLink');
-    roomA.href = '/room.html?id=' + streamId;
-    const pill = $('#headerLivePill');
-    if (pill) pill.classList.add('show');
-    signalSince = 0;
-    pollTimer = setInterval(pollSignals, 1500);
-    chatTimer = setInterval(loadChatSales, 3000);
-    loadChatSales();
-    toast('You are live!', 'ok');
+    startLivePanel(s);
   } catch (e) {
     $('#setupMsg').innerHTML = '<span class="err">' + esc(e.message) + '</span>';
     toast(e.message || 'Could not go live', 'err');
@@ -155,6 +208,100 @@ $('#goLiveBtn').onclick = async () => {
     btn.textContent = '🔴 Go live';
   }
 };
+
+// ---- Breaks: create one, list yours, go live on one ----
+// Spot labels win over the spot count when both are given; blank labels
+// mean "Spot 1, Spot 2, …". Spots go on sale the moment the break exists.
+async function createBreak() {
+  const channel = $('#bChannel').value.trim(), title = $('#bTitle').value.trim();
+  const category = $('#bCategory').value;
+  const opening = $('#bOpening').value.trim();
+  const price = parseFloat($('#bPrice').value);
+  const count = parseInt($('#bCount').value || '0', 10);
+  const labels = $('#bLabels').value.split('\n').map(s => s.trim()).filter(Boolean);
+  if (!channel || !title) { $('#breakMsg').innerHTML = '<span class="warn">Channel name and title are required.</span>'; return; }
+  if (!(price > 0)) { $('#breakMsg').innerHTML = '<span class="warn">Price per spot must be above $0.</span>'; return; }
+  if (!labels.length && !count) { $('#breakMsg').innerHTML = '<span class="warn">Set the number of spots, or list the spot labels.</span>'; return; }
+  const btn = $('#createBreakBtn');
+  btn.disabled = true; btn.textContent = 'Creating…';
+  try {
+    const br = await api('/api/breaks', { method: 'POST', body: JSON.stringify({ channel_name: channel, title, category, opening, spot_price: price, spot_count: count, labels }) });
+    $('#breakMsg').innerHTML = `<span class="ok">Break created — <a href="/room.html?id=${br.stream_id}">view the room</a>. Spots are on sale now.</span>`;
+    toast('Break created — spots are on sale', 'ok');
+    $('#bTitle').value = ''; $('#bOpening').value = ''; $('#bPrice').value = ''; $('#bCount').value = ''; $('#bLabels').value = '';
+    loadMyBreaks();
+  } catch (e) {
+    $('#breakMsg').innerHTML = '<span class="err">' + esc(e.message) + '</span>';
+    toast(e.message || 'Could not create break', 'err');
+  } finally { btn.disabled = false; btn.textContent = '🎲 Create break'; }
+}
+async function loadMyBreaks() {
+  try {
+    const breaks = await api('/api/breaks');
+    const list = [...breaks.filter(b => b.status === 'live'), ...breaks.filter(b => b.status === 'upcoming')];
+    $('#myBreaks').innerHTML = list.length ? list.map(b => `<div class="row" style="justify-content:space-between;border-bottom:1px solid #2a2f3a;padding:8px 0">
+      <span><b>${esc(b.title)}</b> <span class="${b.status === 'live' ? 'live-badge' : 'upcoming-badge'}">${b.status === 'live' ? '● LIVE' : '📅 UPCOMING'}</span><br>
+      <span class="meta">${esc(b.channel_name)} · ${esc(b.category)}${b.opening ? ' · ' + esc(b.opening) : ''} · ${b.spots_sold}/${b.spots_total} spots sold · $${Number(b.spot_price).toFixed(2)}/spot</span></span>
+      <span>${b.status === 'upcoming' ? `<button class="small" onclick="goLiveBreak(${b.id})">🔴 Go live</button> ` : ''}<a href="/room.html?id=${b.stream_id}"><button class="small secondary">View room</button></a></span>
+    </div>`).join('') : '<p class="note">No breaks yet — create your first one above.</p>';
+  } catch (e) { $('#myBreaks').innerHTML = '<p class="note">Could not load breaks.</p>'; }
+}
+async function goLiveBreak(breakId) {
+  if (!confirm('Go live on this break now? Viewers will see the live video in the break room.')) return;
+  try {
+    if (!localStream) await preview();
+    const s = await api(`/api/breaks/${breakId}/go-live`, { method: 'POST' });
+    startLivePanel(s);
+  } catch (e) { toast(e.message || 'Could not go live on this break', 'err'); }
+}
+loadMyBreaks();
+
+// ---- Pulls (host records what came out of the break, live) ----
+// Pulls are entered here in the Studio — the room page shows them
+// read-only. There are no accounts, so this is a convention: the admin
+// can remove a pull from the admin panel.
+async function loadBreakForLive() {
+  liveBreakId = null;
+  const sec = $('#pullsSection');
+  if (!streamId) return;
+  try {
+    const breaks = await api('/api/breaks?stream_id=' + streamId);
+    const br = breaks[0];
+    if (!br) { sec.style.display = 'none'; return; }
+    liveBreakId = br.id;
+    sec.style.display = 'block';
+    loadPulls();
+  } catch (e) { sec.style.display = 'none'; }
+}
+async function loadPulls() {
+  if (!liveBreakId) return;
+  try {
+    const br = await api('/api/breaks/' + liveBreakId);
+    $('#breakSpotsLine').innerHTML = `🎲 ${esc(br.title)} — <b>${br.spots_sold} of ${br.spots_total} spots sold</b> · $${Number(br.spot_price).toFixed(2)} per spot`;
+    const sel = $('#pullSpot');
+    const cur = sel.value;
+    sel.innerHTML = br.spots.map(s => `<option value="${s.id}">${esc(s.label)}${s.status === 'sold' ? ' — ' + esc(s.buyer) : ' (unsold)'}</option>`).join('');
+    if (cur) sel.value = cur;
+    $('#pullsList').innerHTML = br.pulls.length ? br.pulls.map(p => `<div class="pull-card"><div class="pull-item">🎉 ${esc(p.item)}</div><div class="pull-spot">→ ${esc(p.spot_label || 'a spot')}</div><div class="pull-time">${new Date(p.created_at).toLocaleString()} <button class="small secondary" style="margin-left:8px" onclick="delPull(${p.id})">Remove</button></div></div>`).join('') : '<p class="note">No pulls recorded yet — record each pull as it happens.</p>';
+  } catch (e) {}
+}
+async function addPull() {
+  if (!liveBreakId) return;
+  const spotId = Number($('#pullSpot').value);
+  const item = $('#pullItem').value.trim();
+  if (!spotId || !item) { toast('Pick a spot and describe what was pulled', 'warn'); return; }
+  try {
+    await api(`/api/breaks/${liveBreakId}/pulls`, { method: 'POST', body: JSON.stringify({ spot_id: spotId, item }) });
+    $('#pullItem').value = '';
+    toast('Pull recorded', 'ok');
+    loadPulls();
+  } catch (e) { toast(e.message || 'Could not record pull', 'err'); }
+}
+async function delPull(id) {
+  if (!liveBreakId || !confirm('Remove this pull from the break page?')) return;
+  try { await api(`/api/breaks/${liveBreakId}/pulls/${id}`, { method: 'DELETE' }); loadPulls(); }
+  catch (e) { toast(e.message || 'Could not remove pull', 'err'); }
+}
 
 function updateIndicator() {
   const connected = Object.values(pcs).filter(pc => pc.connectionState === 'connected' || pc.connectionState === 'connecting').length;
@@ -200,6 +347,7 @@ async function loadChatSales() {
     $('#sales').innerHTML = orders.length
       ? orders.map(o => `<p>${esc(o.product_name || 'Product')} — $${Number(o.amount).toFixed(2)} · ${esc(o.buyer)} · <i>${esc(o.payment_method)}</i></p>`).join('')
       : '<span class="note">No orders yet.</span>';
+    if (liveBreakId) loadPulls();
   } catch (e) {}
 }
 
@@ -307,7 +455,7 @@ async function uploadRecording(blob, duration) {
   try {
     const q = new URLSearchParams({
       stream_id: String(streamId || ''),
-      channel: $('#channel').value.trim(),
+      channel: liveChannel || $('#channel').value.trim(),
       title: $('#liveTitle').textContent || 'Untitled stream',
       duration: String(duration),
     });

@@ -1,10 +1,11 @@
 <!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Watch — LiveStream</title><link rel="stylesheet" href="/style.css"><link rel="manifest" href="/manifest.json"><meta name="theme-color" content="#0c0e13"></head><body>
 <header><div class="logo">Live<span>Stream</span></div><nav>
-<a href="/">Discover</a><a href="/studio.html">Studio</a><a href="/dashboard.html">Dashboard</a><a href="/admin.html">Admin</a>
+<a href="/">Breaks</a><a href="/studio.html">Studio</a><a href="/dashboard.html">Dashboard</a><a href="/admin.html">Admin</a>
 </nav></header>
 <main>
 <div id="room"></div>
+<div id="breakSection"></div>
 <div class="card" id="videoCard"><video id="remoteVideo" autoplay muted playsinline></video>
 <p id="videoState" class="warn">Connecting to host…</p>
 <div class="row"><button id="unmuteBtn" class="secondary">▶ Play with sound</button></div></div>
@@ -55,8 +56,59 @@
 const params = new URLSearchParams(location.search);
 const streamId = Number(params.get('id'));
 const myId = viewerId();
-let stream = null, pc = null, signalSince = 0, joinedAt = Date.now(), gotVideo = false, pollTimer, chatTimer, hbTimer;
+let stream = null, pc = null, signalSince = 0, joinedAt = Date.now(), gotVideo = false, pollTimer, chatTimer, hbTimer, breakTimer;
 let selectedProduct = null, selectedMethod = null, stripeEnabled = false;
+let currentBreak = null; // full break detail (spots + pulls) when this room is a break
+
+// ---- Break view: banner, spots grid, pulls (read-only — pulls are
+// entered by the host in the Studio). Refreshes every 5s while open.
+async function loadBreak() {
+  const sec = $('#breakSection');
+  if (!sec) return;
+  try {
+    const breaks = await api('/api/breaks?stream_id=' + streamId);
+    const br = breaks[0];
+    if (!br) { currentBreak = null; sec.innerHTML = ''; return; }
+    const detail = await api('/api/breaks/' + br.id);
+    currentBreak = detail;
+    renderBreak();
+  } catch (e) { /* no break on this stream — the room is a plain stream */ }
+}
+function renderBreak() {
+  const br = currentBreak;
+  const sec = $('#breakSection');
+  if (!br || !sec) return;
+  const pct = br.spots_total ? Math.round((br.spots_sold / br.spots_total) * 100) : 0;
+  const statusBadge = br.status === 'live' ? '<span class="live-badge">● LIVE BREAK</span>'
+    : br.status === 'upcoming' ? '<span class="upcoming-badge">📅 UPCOMING BREAK</span>'
+    : '<span class="ended-badge">🏆 BREAK ENDED</span>';
+  const spots = br.spots.map(s => {
+    if (s.status === 'sold') return `<button class="spot sold" disabled><b>✓ ${esc(s.label)}</b><span>${esc(s.buyer)}</span></button>`;
+    if ((s.stock ?? 1) <= 0) return `<button class="spot held" disabled><b>⏳ ${esc(s.label)}</b><span>Held — checkout in progress</span></button>`;
+    return `<button class="spot available" onclick="openCheckout(${s.product_id})"><b>🎲 ${esc(s.label)}</b><span>$${Number(br.spot_price).toFixed(2)} · Buy spot</span></button>`;
+  }).join('');
+  const pulls = br.pulls.length ? br.pulls.map(p => `<div class="pull-card"><div class="pull-item">🎉 ${esc(p.item)}</div><div class="pull-spot">→ ${esc(p.spot_label || 'a spot')}</div><div class="pull-time">${new Date(p.created_at).toLocaleString()}</div></div>`).join('')
+    : '<p class="note">No pulls yet — the host records each pull here as it happens on camera.</p>';
+  sec.innerHTML = `
+  <div class="break-banner">
+    ${statusBadge}
+    <h2>🎲 ${esc(br.title)}</h2>
+    <p class="meta">${esc(br.category)} · ${esc(br.channel_name)}${br.opening ? ' · opening: ' + esc(br.opening) : ''}</p>
+    <div class="progress"><i style="width:${pct}%"></i></div>
+    <div class="meta"><b>${br.spots_sold} of ${br.spots_total} spots sold</b> · $${Number(br.spot_price).toFixed(2)} per spot</div>
+    <p class="note" style="margin:8px 0 0">A spot buys a chance at what gets pulled — not a specific item. The host assigns each pull live on camera.</p>
+  </div>
+  <div class="card"><h2>🎲 Spots</h2>
+    <div class="spot-grid">${spots}</div>
+    <p class="note">Tap an available spot to buy it. Sold spots show who bought them.</p>
+  </div>
+  <div class="card"><h2>🎉 Pulls</h2>${pulls}</div>`;
+  // Spot products must be known to the checkout modal even though they are
+  // hidden from the generic shop list below.
+  const spotProds = br.spots.map(s => ({ id: s.product_id, name: `${br.title} · ${s.label}`, price: s.price, stock: s.stock, stream_id: streamId }));
+  const rest = (window._products || []).filter(p => !spotProds.some(sp => sp.id === p.id));
+  window._products = [...rest, ...spotProds];
+}
 
 async function init() {
   if (!streamId) { $('#room').innerHTML = '<p>No stream selected. <a href="/">Back to Discover</a></p>'; return; }
@@ -70,9 +122,10 @@ async function init() {
     if (fp) fp.textContent = '18+ only · Secure card payments by Stripe.';
   }
   stream = await api('/api/streams/' + streamId);
+  await loadBreak();
   const followed = (await api('/api/follows')).some(f => f.channel === stream.channel_name);
   $('#room').innerHTML = `<h1>${esc(stream.title)}</h1>
-    <p><span class="${stream.status === 'live' ? 'live-badge' : 'ended-badge'}">${stream.status === 'live' ? '● LIVE' : 'ENDED'}</span>
+    <p><span class="${stream.status === 'live' ? 'live-badge' : stream.status === 'upcoming' ? 'upcoming-badge' : 'ended-badge'}">${stream.status === 'live' ? '● LIVE' : stream.status === 'upcoming' ? '📅 UPCOMING' : 'ENDED'}</span>
     <b>${esc(stream.channel_name)}</b> · ${esc(stream.category)} ·
     👁 <span id="vc">${stream.viewer_count}</span> watching</p>
     <button id="followBtn" class="${followed ? 'secondary' : ''}">${followed ? '✓ Following' : '+ Follow'}</button>`;
@@ -87,9 +140,21 @@ async function init() {
       $('#followBtn').className = 'secondary';
     }
   };
+  breakTimer = setInterval(loadBreak, 5000);
+  if (stream.status === 'upcoming') {
+    const vc = document.getElementById('videoCard'); if (vc) vc.style.display = 'none';
+    $('#room').insertAdjacentHTML('beforeend', '<p class="note">⏳ This break hasn\'t started yet — spots are on sale below. Come back when it goes live.</p>');
+    loadChatProducts(); return;
+  }
   if (stream.status !== 'live') {
     const vc = document.getElementById('videoCard'); if (vc) vc.style.display = 'none';
-    $('#room').insertAdjacentHTML('beforeend', '<p class="note">This stream has ended. <a href="/">Back to Discover</a></p>');
+    let replayHtml = '';
+    try {
+      const recs = await api('/api/recordings');
+      const rec = recs.find(r => r.stream_id === streamId);
+      if (rec) replayHtml = ` <a href="/replay.html?id=${rec.id}">▶ Watch the replay</a>`;
+    } catch (e) {}
+    $('#room').insertAdjacentHTML('beforeend', `<p class="note">This stream has ended.${replayHtml} <a href="/">Back to Discover</a></p>`);
     loadChatProducts(); return;
   }
   // Heartbeat (viewer count) + join signal
@@ -147,13 +212,17 @@ async function loadChatProducts() {
   $('#chat').innerHTML = msgs.map(m => `<p><b>${esc(m.author)}:</b> ${esc(m.text)}</p>`).join('') || '<p class="note">No chat yet — be the first to say hello.</p>';
   const prods = await api(`/api/products?stream_id=${streamId}`);
   const all = prods.length ? prods : await api('/api/products');
-  $('#products').innerHTML = (prods.length ? prods : all).map(p => `
+  const shown = prods.length ? prods : all;
+  $('#products').innerHTML = shown.map(p => `
     <div class="row" style="justify-content:space-between;border-bottom:1px solid #2a2f3a;padding:8px 0">
       <span><b>${esc(p.name)}</b><br>$${Number(p.price).toFixed(2)} · ${p.stock} in stock</span>
       <span><button class="small" ${p.stock <= 0 ? 'disabled' : ''} onclick='openCheckout(${p.id})'>Buy</button>
       <button class="small secondary" onclick='openReport(${p.id})'>Report</button></span>
     </div>`).join('') || '<p class="note">Nothing for sale on this stream yet.</p>';
-  window._products = (prods.length ? prods : all);
+  // Keep the break's spot products known to the checkout modal (the spots
+  // grid buys them) even though they are hidden from this shop list.
+  const spotProds = (window._products || []).filter(p => currentBreak && currentBreak.spots.some(s => s.product_id === p.id));
+  window._products = [...shown, ...spotProds];
 }
 async function sendChat() {
   const inp = $('#chatInput'); if (!inp.value.trim()) return;
