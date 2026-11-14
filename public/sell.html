@@ -1,0 +1,78 @@
+<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Sell — LiveStream</title><link rel="stylesheet" href="/style.css"><link rel="manifest" href="/manifest.json"><meta name="theme-color" content="#0c0e13"></head><body>
+<header><div class="logo">Live<span>Stream</span></div><nav>
+<a href="/">Breaks</a><a href="/studio.html">Studio</a><a href="/sell.html">Sell</a><a href="/dashboard.html">Dashboard</a><a href="/admin.html">Admin</a>
+</nav></header>
+<main>
+<h1>Sell on LiveStream</h1>
+<div class="card"><h2 style="margin-top:0">How selling works</h2>
+<p>1. <b>Sign up below</b> with your channel name and how you want to be paid.</p>
+<p>2. <b>The site owner approves you.</b> Only approved sellers can list a product or run a break — that's how the marketplace stays honest.</p>
+<p>3. <b>List products or run a break</b> from the Studio or your stream room, and go live.</p>
+<p>4. <b>Buyers pay securely at checkout.</b> Sales are paid to the site owner's account first, and the owner pays you out using the payout details you gave here.</p>
+<p class="note">You must be 18 or older to sell. While the site is in test mode, checkouts use test payments only — no real money moves until live payments are switched on.</p></div>
+
+<div class="card"><h2 style="margin-top:0">Seller sign-up</h2>
+<label>Channel name</label>
+<input id="sChannel" placeholder="Your channel name — e.g. ZiggyCards" autocomplete="off">
+<label>Display name (optional)</label>
+<input id="sDisplay" placeholder="Shown to buyers — leave blank to use your channel name" autocomplete="off">
+<label>How should the owner pay you?</label>
+<select id="sMethod" style="width:100%">
+<option>Cash App</option><option>PayPal</option><option>Bank transfer</option><option>Other</option>
+</select>
+<label>Payout detail</label>
+<input id="sHandle" placeholder="$yourcashtag" autocomplete="off">
+<p class="note">Only the payout detail needed to pay you — a $cashtag, a PayPal email, or how to reach you. Never enter a full card number or bank password here.</p>
+<div class="row"><button onclick="signup()">Sign up to sell</button><span id="sMsg" class="note"></span></div>
+</div>
+
+<div class="card"><h2 style="margin-top:0">Check your status</h2>
+<p class="note">Signed up already? Enter your channel name to see whether you're approved yet.</p>
+<div class="row"><input id="qChannel" placeholder="Channel name" style="flex:2" autocomplete="off">
+<button class="small" onclick="checkStatus()">Check status</button></div>
+<p id="qMsg" class="note"></p>
+</div>
+</main>
+<footer>
+<p><a href="/terms.html">Terms of Service</a> · <a href="/privacy.html">Privacy Policy</a> · <a href="/sales-policy.html">Seller &amp; Sales Policy</a></p>
+<p id="footerPayNote">18+ only · No real payments yet — orders record the payment method chosen, no money is charged.</p>
+</footer>
+<script src="/app.js"></script>
+<script>
+const HANDLE_HINTS = {
+  'Cash App': '$yourcashtag',
+  'PayPal': 'PayPal email address',
+  'Bank transfer': 'Bank name + last 4 of account, or how to reach you',
+  'Other': 'How should the owner pay you?',
+};
+$('#sMethod').addEventListener('change', () => {
+  $('#sHandle').placeholder = HANDLE_HINTS[$('#sMethod').value] || '';
+});
+async function signup() {
+  const channel = $('#sChannel').value.trim();
+  const method = $('#sMethod').value;
+  const handle = $('#sHandle').value.trim();
+  if (!channel) { $('#sMsg').textContent = 'Enter your channel name first.'; return; }
+  if (!handle) { $('#sMsg').textContent = 'Add your payout detail first — that is how you get paid.'; return; }
+  try {
+    const s = await api('/api/sellers', { method: 'POST', body: JSON.stringify({ channel_name: channel, display_name: $('#sDisplay').value.trim(), payout_method: method, payout_handle: handle }) });
+    $('#sMsg').innerHTML = s.status === 'approved'
+      ? `<span class="ok">You're approved — you can list products and run breaks now.</span>`
+      : `<span class="ok">Signed up — your request is pending approval. Check back here for your status.</span>`;
+    toast('Seller sign-up saved', 'ok');
+  } catch (e) { $('#sMsg').textContent = 'Could not sign up: ' + e.message; toast(e.message || 'Sign-up failed', 'err'); }
+}
+async function checkStatus() {
+  const channel = $('#qChannel').value.trim();
+  if (!channel) { $('#qMsg').textContent = 'Enter your channel name first.'; return; }
+  try {
+    const s = await api('/api/sellers?channel=' + encodeURIComponent(channel));
+    $('#qMsg').innerHTML = s.status === 'approved'
+      ? `<span class="ok"><b>${esc(s.channel_name)}</b> is approved — you can list products and run breaks.</span>`
+      : s.status === 'blocked'
+      ? `<span class="warn"><b>${esc(s.channel_name)}</b> is blocked from selling.</span>`
+      : `<span class="warn"><b>${esc(s.channel_name)}</b> is still pending approval.</span>`;
+  } catch (e) { $('#qMsg').textContent = e.message && e.message.includes('no seller') ? 'No sign-up for that channel yet — use the form above.' : 'Could not check status: ' + e.message; }
+}
+</script></body></html>

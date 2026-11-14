@@ -177,6 +177,24 @@ CREATE TABLE IF NOT EXISTS break_pulls (
   item TEXT NOT NULL,
   created_at INTEGER NOT NULL
 );
+-- Sellers: sign-up + approval. Anyone can ask to sell, but only an
+-- approved seller can list a product or run a break. There are no
+-- passwords — the channel name is the identity, as everywhere else on
+-- the site, and the owner's approval is the control. Payouts are manual:
+-- sales land in the owner's Stripe account, and the owner pays each
+-- seller out using the payout details they gave at sign-up.
+-- status: pending | approved | blocked.
+CREATE TABLE IF NOT EXISTS sellers (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  channel_name TEXT NOT NULL,
+  display_name TEXT NOT NULL DEFAULT '',
+  payout_method TEXT NOT NULL DEFAULT '',
+  payout_handle TEXT NOT NULL DEFAULT '',
+  status TEXT NOT NULL DEFAULT 'pending',
+  created_at INTEGER NOT NULL,
+  decided_at INTEGER
+);
+CREATE INDEX IF NOT EXISTS idx_sellers_channel ON sellers(channel_name);
 -- Visitor analytics (simple, first-party only — no third-party service).
 -- visitors: one row per random visitor cookie (no raw IPs stored anywhere).
 -- page_views: one row per HTML page load.
@@ -317,6 +335,22 @@ function endBreakForStream(streamId) {
 // Frees the spot linked to an order (refund/cancel): the spot goes back on
 // sale. Does NOT touch stock — callers that already restored stock (the
 // Stripe refund handler) must not double-restore it.
+// A channel can only sell once the owner has approved its seller sign-up.
+const PAYOUT_METHODS = ['Cash App', 'PayPal', 'Bank transfer', 'Other'];
+function sellerFor(channel) {
+  if (!channel) return null;
+  return db.prepare('SELECT * FROM sellers WHERE LOWER(channel_name)=LOWER(?)').get(channel);
+}
+function isApprovedSeller(channel) {
+  const s = sellerFor(channel);
+  return !!(s && s.status === 'approved');
+}
+// Public view of a seller — payout details stay private (the owner sees
+// them in the admin panel only).
+function sellerPublic(s) {
+  if (!s) return null;
+  return { id: s.id, channel_name: s.channel_name, display_name: s.display_name, payout_method: s.payout_method, status: s.status, created_at: s.created_at };
+}
 function freeSpot(orderId) {
   const spot = db.prepare('SELECT * FROM break_spots WHERE order_id=?').get(orderId);
   if (!spot) return null;
@@ -844,6 +878,24 @@ const server = http.createServer(async (req, res) => {
         return sendJson(res, 200, { ok: true });
       }
 
+      // Sellers: list all sign-ups; approve or block one. Blocking an
+      // approved seller stops them listing again immediately.
+      if (p === '/api/admin/sellers' && req.method === 'GET') {
+        return sendJson(res, 200, db.prepare('SELECT * FROM sellers ORDER BY created_at DESC LIMIT 200').all());
+      }
+      const adminSellerApprove = p.match(/^\/api\/admin\/sellers\/(\d+)\/approve$/);
+      if (adminSellerApprove && req.method === 'POST') {
+        db.prepare("UPDATE sellers SET status='approved', decided_at=? WHERE id=?").run(now(), adminSellerApprove[1]);
+        const s = db.prepare('SELECT * FROM sellers WHERE id=?').get(adminSellerApprove[1]);
+        return s ? sendJson(res, 200, s) : sendJson(res, 404, { error: 'seller not found' });
+      }
+      const adminSellerBlock = p.match(/^\/api\/admin\/sellers\/(\d+)\/block$/);
+      if (adminSellerBlock && req.method === 'POST') {
+        db.prepare("UPDATE sellers SET status='blocked', decided_at=? WHERE id=?").run(now(), adminSellerBlock[1]);
+        const s = db.prepare('SELECT * FROM sellers WHERE id=?').get(adminSellerBlock[1]);
+        return s ? sendJson(res, 200, s) : sendJson(res, 404, { error: 'seller not found' });
+      }
+
       return sendJson(res, 404, { error: 'unknown admin route' });
     }
 
@@ -998,6 +1050,7 @@ const server = http.createServer(async (req, res) => {
       const b = await readBody(req);
       const channel = esc(b.channel_name), title = esc(b.title);
       if (!channel || !title) return sendJson(res, 400, { error: 'channel_name and title are required' });
+      if (!isApprovedSeller(channel)) return sendJson(res, 403, { error: 'Only approved sellers can run a break — sign up to sell first, then wait for approval.' });
       const category = b.category;
       if (!BREAK_CATEGORIES.includes(category)) return sendJson(res, 400, { error: 'category must be one of: ' + BREAK_CATEGORIES.join(', ') });
       const opening = esc(b.opening || '').slice(0, 200);
@@ -1091,6 +1144,32 @@ const server = http.createServer(async (req, res) => {
       return sendJson(res, 200, { ok: true });
     }
 
+    // Sellers: sign-up + status lookup. Sign-up is public (age-verified);
+    // approval happens in the admin panel. Signing up twice for the same
+    // channel returns the existing record — one sign-up per channel.
+    if (p === '/api/sellers' && req.method === 'POST') {
+      if (!requireAge(req, res)) return;
+      const b = await readBody(req);
+      const channel = esc(b.channel_name);
+      if (!channel) return sendJson(res, 400, { error: 'channel_name is required' });
+      const method = esc(b.payout_method || '');
+      if (!PAYOUT_METHODS.includes(method)) return sendJson(res, 400, { error: 'payout_method must be one of: ' + PAYOUT_METHODS.join(', ') });
+      const handle = esc(b.payout_handle || '').slice(0, 200);
+      if (!handle) return sendJson(res, 400, { error: 'payout_handle is required — how should the owner pay you?' });
+      const existing = sellerFor(channel);
+      if (existing) return sendJson(res, 200, sellerPublic(existing));
+      const r = db.prepare('INSERT INTO sellers (channel_name, display_name, payout_method, payout_handle, status, created_at) VALUES (?,?,?,?,?,?)')
+        .run(channel, esc(b.display_name || '') || channel, method, handle, 'pending', now());
+      return sendJson(res, 201, sellerPublic(db.prepare('SELECT * FROM sellers WHERE id=?').get(r.lastInsertRowid)));
+    }
+    if (p === '/api/sellers' && req.method === 'GET') {
+      const channel = (u.searchParams.get('channel') || '').trim();
+      if (!channel) return sendJson(res, 400, { error: 'channel is required' });
+      const s = sellerFor(channel);
+      if (!s) return sendJson(res, 404, { error: 'no seller sign-up for this channel yet' });
+      return sendJson(res, 200, sellerPublic(s));
+    }
+
     // Chat
     const chatMatch = p.match(/^\/api\/streams\/(\d+)\/chat$/);
     if (chatMatch && req.method === 'GET') {
@@ -1124,6 +1203,15 @@ const server = http.createServer(async (req, res) => {
       if (!requireAge(req, res)) return;
       const b = await readBody(req);
       if (!esc(b.name) || !(Number(b.price) > 0)) return sendJson(res, 400, { error: 'name and a price > 0 are required' });
+      // Only an approved seller can list. The channel comes from the stream
+      // (room listings) or the form itself (dashboard listings).
+      let channel = esc(b.channel_name || '');
+      if (b.stream_id) {
+        const st = db.prepare('SELECT channel_name FROM streams WHERE id=?').get(Number(b.stream_id));
+        if (st) channel = st.channel_name;
+      }
+      if (!channel) return sendJson(res, 400, { error: 'channel_name is required to list a product' });
+      if (!isApprovedSeller(channel)) return sendJson(res, 403, { error: 'Only approved sellers can list products — sign up to sell first, then wait for approval.' });
       const stock = Math.max(0, parseInt(b.stock, 10) || 0);
       const r = db.prepare('INSERT INTO products (name, price, stock, stream_id, created_at) VALUES (?,?,?,?,?)')
         .run(esc(b.name), Number(b.price), stock, b.stream_id ? Number(b.stream_id) : null, now());

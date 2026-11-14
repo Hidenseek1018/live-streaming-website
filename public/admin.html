@@ -1,7 +1,7 @@
 <!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Admin — LiveStream</title><link rel="stylesheet" href="/style.css"><link rel="manifest" href="/manifest.json"><meta name="theme-color" content="#0c0e13"></head><body>
 <header><div class="logo">Live<span>Stream</span></div><nav>
-<a href="/">Breaks</a><a href="/studio.html">Studio</a><a href="/dashboard.html">Dashboard</a><a href="/admin.html">Admin</a>
+<a href="/">Breaks</a><a href="/studio.html">Studio</a><a href="/sell.html">Sell</a><a href="/dashboard.html">Dashboard</a><a href="/admin.html">Admin</a>
 </nav></header>
 <main>
 <h1>Site admin</h1>
@@ -26,6 +26,7 @@
 
 <div class="card"><h2>Live streams</h2><div id="live"><p class="note">Loading…</p></div></div>
 <div class="card"><h2>🎲 Breaks</h2><p class="note">End a break to close it and its stream — the break page keeps its pulls. Removing a pull takes it off the break page.</p><div id="breaks"><p class="note">Loading…</p></div></div>
+<div class="card"><h2>🏪 Sellers</h2><p class="note">Sellers sign up to sell, but only approved sellers can list a product or run a break. Approve a sign-up to let that channel sell; block one to stop it listing again. Sales are paid to your account first — pay each seller out using the payout details they gave.</p><div id="sellers"><p class="note">Loading…</p></div></div>
 <div class="card"><h2>Recent chat (all streams)</h2><div id="chat"><p class="note">Loading…</p></div></div>
 <div class="card"><h2>Products</h2><div id="products"><p class="note">Loading…</p></div></div>
 <div class="card"><h2>Orders</h2><div id="orders"><p class="note">Loading…</p></div></div>
@@ -111,6 +112,9 @@ async function loadAll() {
     const chat = await aapi('/api/admin/chat?limit=100');
     $('#chat').innerHTML = chat.length ? `<div class="scroll-x"><table><tr><th>Message</th><th>Author</th><th>Stream</th><th>When</th><th></th></tr>${chat.map(m => `<tr><td>${esc(m.text)}</td><td>${esc(m.author)}</td><td>${esc(m.stream_title || ('#' + m.stream_id))} — ${esc(m.channel_name || '')}</td><td>${new Date(m.created_at).toLocaleString()}</td><td><button class="small danger" onclick="delChat(${m.id})">Delete</button></td></tr>`).join('')}</table></div>` : '<p class="note">No chat messages yet.</p>';
 
+    const sellers = await aapi('/api/admin/sellers');
+    $('#sellers').innerHTML = sellers.length ? `<div class="scroll-x"><table><tr><th>Channel</th><th>Display name</th><th>Paid via</th><th>Payout detail</th><th>Status</th><th>Signed up</th><th></th></tr>${sellers.map(x => `<tr><td><b>${esc(x.channel_name)}</b></td><td>${esc(x.display_name || '')}</td><td>${esc(x.payout_method || '')}</td><td>${esc(x.payout_handle || '')}</td><td>${x.status === 'approved' ? '<span class="ok">Approved</span>' : x.status === 'blocked' ? '<span class="warn">Blocked</span>' : '<span class="warn">Pending</span>'}</td><td>${new Date(x.created_at).toLocaleString()}</td><td>${x.status !== 'approved' ? `<button class="small" onclick="approveSeller(${x.id})">Approve</button> ` : ''}${x.status !== 'blocked' ? `<button class="small danger" onclick="blockSeller(${x.id})">Block</button>` : ''}</td></tr>`).join('')}</table></div>` : '<p class="note">No seller sign-ups yet.</p>';
+
     const prods = await aapi('/api/admin/products');
     $('#products').innerHTML = prods.length ? `<div class="scroll-x"><table><tr><th>Product</th><th>Price</th><th>Stock</th><th>Pinned stream</th><th>Reports</th><th></th></tr>${prods.map(p => `<tr><td>${esc(p.name)}</td><td>$${Number(p.price).toFixed(2)}</td><td>${p.stock}</td><td>${p.stream_id ? 'Stream #' + p.stream_id : '—'}</td><td>${p.report_count ? `<b class="warn">${p.report_count}</b>` : '0'}</td><td><button class="small danger" onclick="delProduct(${p.id})">Remove</button></td></tr>`).join('')}</table></div>` : '<p class="note">No listings yet.</p>';
 
@@ -150,6 +154,8 @@ async function delPull(breakId, pullId) { if (confirm('Remove this pull from the
 async function delStream(id) { if (confirm('Remove this stream and its chat history?')) { await aapi(`/api/admin/streams/${id}`, { method: 'DELETE' }); loadAll(); } }
 async function delChat(id) { await aapi(`/api/admin/chat/${id}`, { method: 'DELETE' }); loadAll(); }
 async function delProduct(id) { if (confirm('Remove this listing?')) { await aapi(`/api/admin/products/${id}`, { method: 'DELETE' }); loadAll(); } }
+async function approveSeller(id) { if (confirm('Approve this seller? They will be able to list products and run breaks.')) { await aapi(`/api/admin/sellers/${id}/approve`, { method: 'POST' }); loadAll(); } }
+async function blockSeller(id) { if (confirm('Block this seller? They will no longer be able to list products or run breaks.')) { await aapi(`/api/admin/sellers/${id}/block`, { method: 'POST' }); loadAll(); } }
 async function setOrder(id, status) { if (confirm(`Mark order #${id} as ${status}? This only changes the record — no money moves.`)) { await aapi(`/api/admin/orders/${id}/status`, { method: 'POST', body: JSON.stringify({ status }) }); loadAll(); } }
 async function refundOrder(id, amount) {
   if (!confirm(`Refund order #${id} ($${Number(amount).toFixed(2)}) through Stripe? The money goes back to the buyer's original card and the stock is restored. This moves real money and cannot be undone.`)) return;
