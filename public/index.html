@@ -15,6 +15,8 @@
 <div id="shopGrid" class="grid"></div>
 <h2>Recent activity</h2>
 <div id="activity" class="card"><p class="note">Loading…</p></div>
+<h2>Replays</h2>
+<div id="replays" class="grid"></div>
 <h2>Ended streams</h2>
 <div id="ended" class="grid"></div>
 </section>
@@ -135,6 +137,13 @@ async function renderBrowse(streams) {
     <div class="row" style="justify-content:space-between"><span class="ended-badge">ENDED</span><span class="cat">${esc(s.category)}</span></div>
     <h3 style="margin:10px 0 4px">${esc(s.title)}</h3><div>${esc(s.channel_name)}</div>
     <div class="meta">${new Date(s.created_at).toLocaleString()}</div></div>`).join('') : '<p class="note">No ended streams yet.</p>';
+  try {
+    const recs = await api('/api/recordings');
+    $('#replays').innerHTML = recs.length ? recs.map(r => `<div class="stream-card" onclick="location.href='/replay.html?id=${r.id}'">
+      <div class="row" style="justify-content:space-between"><span class="ended-badge">▶ REPLAY</span><span class="cat">${fmtDuration(r.duration_seconds)}</span></div>
+      <h3 style="margin:10px 0 4px">${esc(r.title || 'Untitled stream')}</h3><div>${esc(r.channel_name)}</div>
+      <div class="meta">${new Date(r.created_at).toLocaleString()} · ${fmtSize(r.size_bytes)}</div></div>`).join('') : '<p class="note">No recordings yet — hosts can record a live from the Studio.</p>';
+  } catch (e) { $('#replays').innerHTML = '<p class="note">Could not load replays.</p>'; }
   try {
     const prods = await api('/api/products');
     const streamById = new Map(streams.map(s => [s.id, s]));

@@ -31,6 +31,9 @@
 
 <div class="card"><h2>Orders received</h2><div id="orders"><p class="note">Loading…</p></div></div>
 <div class="card"><h2>Stream history</h2><div id="history"><p class="note">Loading…</p></div></div>
+<div class="card"><h2>Recordings</h2>
+<p class="note">Replays of recorded streams. Deleting here is for the host who recorded it — the admin panel can remove any recording.</p>
+<div id="recordings"><p class="note">Loading…</p></div></div>
 <div class="card"><h2>Channels you follow</h2><div id="follows"><p class="note">Loading…</p></div></div>
 <div class="card"><h2>Site admin</h2>
 <p class="note">Moderate streams, chat, products, orders and channels — passcode required.</p>
@@ -42,7 +45,7 @@
 </footer>
 <script src="/app.js"></script>
 <script>
-const PAGE_LABELS = { home: 'Home', studio: 'Studio', room: 'Room', dashboard: 'Dashboard', admin: 'Admin' };
+const PAGE_LABELS = { home: 'Home', studio: 'Studio', room: 'Room', replay: 'Replay', dashboard: 'Dashboard', admin: 'Admin' };
 async function load() {
   const s = await api('/api/stats');
   $('#stats').innerHTML = [
@@ -81,6 +84,9 @@ async function load() {
   const streams = await api('/api/streams');
   $('#history').innerHTML = streams.length ? streams.map(s => `<p><span class="${s.status === 'live' ? 'live-badge' : 'ended-badge'}">${s.status.toUpperCase()}</span> <b>${esc(s.title)}</b> — ${esc(s.channel_name)} · ${esc(s.category)} · 👁 ${s.viewer_count} · ${new Date(s.created_at).toLocaleString()} ${s.status === 'live' ? `<a href="/room.html?id=${s.id}">Watch</a>` : ''}</p>`).join('') : '<p class="note">No streams yet.</p>';
 
+  const recs = await api('/api/recordings');
+  $('#recordings').innerHTML = recs.length ? `<div class="scroll-x"><table><tr><th>Recording</th><th>Channel</th><th>Length</th><th>Size</th><th>Recorded</th><th></th></tr>${recs.map(r => `<tr><td>${esc(r.title || 'Untitled stream')}</td><td>${esc(r.channel_name)}</td><td>${fmtDuration(r.duration_seconds)}</td><td>${fmtSize(r.size_bytes)}</td><td>${new Date(r.created_at).toLocaleString()}</td><td><a href="/replay.html?id=${r.id}">Watch</a> <button class="small danger" onclick="delRecording(${r.id})">Delete</button></td></tr>`).join('')}</table></div>` : '<p class="note">No recordings yet — record a live from the Studio.</p>';
+
   const follows = await api('/api/follows');
   $('#follows').innerHTML = follows.length ? follows.map(f => `<p>${esc(f.channel)} <button class="small secondary" onclick="unfollow('${esc(f.channel)}')">Unfollow</button></p>`).join('') : '<p class="note">You are not following anyone yet.</p>';
 }
@@ -93,6 +99,11 @@ async function saveMethod() {
 async function setDefault(id) { await api(`/api/payment-methods/${id}/default`, { method: 'POST' }); load(); }
 async function delMethod(id) { await api(`/api/payment-methods/${id}`, { method: 'DELETE' }); load(); }
 async function unfollow(ch) { await fetch('/api/follows?channel=' + encodeURIComponent(ch), { method: 'DELETE' }); load(); }
+async function delRecording(id) {
+  if (!confirm('Delete this recording? Viewers will no longer be able to watch the replay.')) return;
+  try { await api(`/api/recordings/${id}`, { method: 'DELETE' }); toast('Recording deleted', 'ok'); load(); }
+  catch (e) { toast(e.message || 'Could not delete recording', 'err'); }
+}
 async function addProduct() {
   const name = $('#pName').value.trim(), price = parseFloat($('#pPrice').value), stock = parseInt($('#pStock').value || '0', 10);
   if (!name || !(price > 0)) { toast('Product name and a price above $0 are required', 'warn'); return; }

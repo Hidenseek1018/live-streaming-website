@@ -35,6 +35,22 @@ function displayName() {
 }
 const CATEGORIES = ['Gaming', 'Music', 'Shopping', 'Talk', 'Sports', 'Cooking', 'Other'];
 const ONE_TIME_METHODS = ['Card', 'PayPal', 'Apple Pay', 'Google Pay', 'Cash App', 'Bank transfer'];
+// Shared formatting for recordings (replays): "12:34" / "1:02:03", "4.2 MB".
+function fmtDuration(sec) {
+  if (sec == null || isNaN(sec)) return '—';
+  const s = Math.round(Number(sec));
+  const h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60), r = s % 60;
+  const mm = String(m).padStart(2, '0'), ss = String(r).padStart(2, '0');
+  return h > 0 ? `${h}:${mm}:${ss}` : `${mm}:${ss}`;
+}
+function fmtSize(bytes) {
+  if (bytes == null || isNaN(bytes)) return '—';
+  const b = Number(bytes);
+  if (b < 1024) return b + ' B';
+  if (b < 1024 * 1024) return (b / 1024).toFixed(1) + ' KB';
+  if (b < 1024 * 1024 * 1024) return (b / (1024 * 1024)).toFixed(1) + ' MB';
+  return (b / (1024 * 1024 * 1024)).toFixed(2) + ' GB';
+}
 
 /* ---- Toast notifications ---- */
 function ensureToastRoot() {

@@ -28,6 +28,7 @@
 <div class="card"><h2>Recent chat (all streams)</h2><div id="chat"><p class="note">Loading…</p></div></div>
 <div class="card"><h2>Products</h2><div id="products"><p class="note">Loading…</p></div></div>
 <div class="card"><h2>Orders</h2><div id="orders"><p class="note">Loading…</p></div></div>
+<div class="card"><h2>Recordings</h2><div id="recordings"><p class="note">Loading…</p></div></div>
 <div class="card"><h2>Channels</h2><div id="channels"><p class="note">Loading…</p></div></div>
 </div>
 </main>
@@ -37,7 +38,7 @@
 </footer>
 <script src="/app.js"></script>
 <script>
-const PAGE_LABELS = { home: 'Home', studio: 'Studio', room: 'Room', dashboard: 'Dashboard', admin: 'Admin' };
+const PAGE_LABELS = { home: 'Home', studio: 'Studio', room: 'Room', replay: 'Replay', dashboard: 'Dashboard', admin: 'Admin' };
 let CODE = sessionStorage.getItem('admin_code') || '';
 function headers() { return { 'Content-Type': 'application/json', 'x-admin-code': CODE }; }
 async function aapi(path, opts) {
@@ -74,6 +75,7 @@ async function loadAll() {
       ['Blocked channels', s.blocked_channels], ['Viewers now', s.viewers], ['Products', s.products],
       ['Orders', s.orders], ['Cancelled / refunded', s.cancelled_orders],
       ['Revenue (active orders)', '$' + Number(s.revenue).toFixed(2)],
+      ['Recordings', s.recordings || 0],
       ['Total visits', s.total_visits], ['Unique visitors', s.unique_visitors], ['Visits today', s.visits_today],
     ].map(([k, v]) => `<div class="stat"><b>${v}</b><span>${k}</span></div>`).join('');
 
@@ -95,6 +97,9 @@ async function loadAll() {
 
     const chans = await aapi('/api/admin/channels');
     $('#channels').innerHTML = chans.length ? `<div class="scroll-x"><table><tr><th>Channel</th><th>Streams</th><th>Live</th><th>Status</th><th></th></tr>${chans.map(c => `<tr><td>${esc(c.channel_name)}</td><td>${c.streams}</td><td>${c.live_streams}</td><td>${c.blocked ? '<span class="warn">Blocked</span>' : '<span class="ok">Active</span>'}</td><td>${c.blocked ? `<button class="small secondary" onclick="unblock('${esc(c.channel_name)}')">Unblock</button>` : `<button class="small danger" onclick="block('${esc(c.channel_name)}')">Block</button>`}</td></tr>`).join('')}</table></div>` : '<p class="note">No channels yet.</p>';
+
+    const recs = await aapi('/api/admin/recordings');
+    $('#recordings').innerHTML = recs.length ? `<div class="scroll-x"><table><tr><th>Recording</th><th>Channel</th><th>Length</th><th>Size</th><th>Recorded</th><th></th></tr>${recs.map(r => `<tr><td>${esc(r.title || 'Untitled stream')}</td><td>${esc(r.channel_name)}</td><td>${fmtDuration(r.duration_seconds)}</td><td>${fmtSize(r.size_bytes)}</td><td>${new Date(r.created_at).toLocaleString()}</td><td><a href="/replay.html?id=${r.id}">Watch</a> <button class="small danger" onclick="delRecording(${r.id})">Delete</button></td></tr>`).join('')}</table></div>` : '<p class="note">No recordings yet.</p>';
   } catch (e) { lock(); $('#gateMsg').textContent = 'Session ended: ' + e.message; }
 }
 async function endStream(id) { if (confirm('End this stream?')) { await aapi(`/api/admin/streams/${id}/end`, { method: 'POST' }); loadAll(); } }
@@ -104,6 +109,7 @@ async function delProduct(id) { if (confirm('Remove this listing?')) { await aap
 async function setOrder(id, status) { if (confirm(`Mark order #${id} as ${status}? This only changes the record — no money moves.`)) { await aapi(`/api/admin/orders/${id}/status`, { method: 'POST', body: JSON.stringify({ status }) }); loadAll(); } }
 async function block(ch) { if (confirm(`Block ${ch} from going live? Any of their live streams end immediately.`)) { await aapi('/api/admin/channels/block', { method: 'POST', body: JSON.stringify({ channel: ch }) }); loadAll(); } }
 async function unblock(ch) { await aapi('/api/admin/channels/unblock', { method: 'POST', body: JSON.stringify({ channel: ch }) }); loadAll(); }
+async function delRecording(id) { if (confirm('Delete this recording? Viewers will no longer be able to watch the replay.')) { await aapi(`/api/admin/recordings/${id}`, { method: 'DELETE' }); loadAll(); } }
 $('#code').addEventListener('keydown', (e) => { if (e.key === 'Enter') unlock(); });
 if (CODE) { aapi('/api/admin/auth').then(() => { $('#gate').style.display = 'none'; $('#panel').style.display = 'block'; loadAll(); }).catch(() => { sessionStorage.removeItem('admin_code'); CODE = ''; }); }
 </script></body></html>

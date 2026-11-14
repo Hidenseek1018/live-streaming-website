@@ -1,0 +1,36 @@
+<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Replay — LiveStream</title><link rel="stylesheet" href="/style.css"><link rel="manifest" href="/manifest.json"><meta name="theme-color" content="#0c0e13"></head><body>
+<header><div class="logo">Live<span>Stream</span></div><nav>
+<a href="/">Discover</a><a href="/studio.html">Studio</a><a href="/dashboard.html">Dashboard</a><a href="/admin.html">Admin</a>
+</nav></header>
+<main>
+<div id="replay"><p class="note">Loading…</p></div>
+</main>
+<footer>
+<p><a href="/terms.html">Terms of Service</a> · <a href="/privacy.html">Privacy Policy</a> · <a href="/sales-policy.html">Seller &amp; Sales Policy</a></p>
+<p>18+ only · No real payments yet — orders record the payment method chosen, no money is charged.</p>
+</footer>
+<script src="/app.js"></script>
+<script>
+const id = new URLSearchParams(location.search).get('id');
+async function load() {
+  if (!id) { $('#replay').innerHTML = '<h1>Replay not found</h1><p class="note">No recording was selected. <a href="/">Back to Discover</a></p>'; return; }
+  try {
+    const r = await api('/api/recordings/' + encodeURIComponent(id));
+    document.title = r.title + ' — Replay';
+    $('#replay').innerHTML = `
+      <h1>${esc(r.title || 'Untitled stream')}</h1>
+      <p class="meta">${esc(r.channel_name)} · recorded ${new Date(r.created_at).toLocaleString()} · ${fmtDuration(r.duration_seconds)} · ${fmtSize(r.size_bytes)}</p>
+      <video src="${esc(r.url)}" controls autoplay playsinline style="margin-top:12px"></video>
+      <p class="note" style="margin-top:12px">This is a replay of a recorded live stream — the host's camera and mic only. There is no live chat on replays.</p>
+      <p><a href="/">← Back to Discover</a> · <a href="/dashboard.html">Dashboard</a></p>`;
+  } catch (e) {
+    if (String(e.message || '').includes('Age verification')) {
+      $('#replay').innerHTML = '<h1>Replay</h1><p class="note">Verify your age above to watch this replay.</p>';
+    } else {
+      $('#replay').innerHTML = '<h1>Replay not found</h1><p class="note">' + esc(e.message || 'This recording does not exist or was deleted.') + ' <a href="/">Back to Discover</a></p>';
+    }
+  }
+}
+load();
+</script></body></html>

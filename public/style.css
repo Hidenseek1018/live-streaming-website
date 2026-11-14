@@ -359,6 +359,23 @@ label{font-size:13px;color:#9aa3b2;font-weight:500}
   animation:pulse 1.4s ease-in-out infinite;
 }
 
+/* ---- Recording indicator (Studio) ---- */
+.rec-status{
+  display:flex;align-items:center;gap:8px;flex-wrap:wrap;
+  padding:8px 12px;
+  background:rgba(225,29,72,.08);
+  border:1px solid rgba(225,29,72,.25);
+  border-radius:10px;
+  margin:-4px 0 14px;
+  font-size:13px;
+}
+.rec-status .dot{
+  width:8px;height:8px;border-radius:50%;background:#e11d48;
+  box-shadow:0 0 0 3px rgba(225,29,72,.25);
+  animation:pulse 1.4s ease-in-out infinite;
+}
+.rec-status .rec-time{font-variant-numeric:tabular-nums;font-weight:700}
+
 /* ---- Toast notifications ---- */
 #toast-root{
   position:fixed;

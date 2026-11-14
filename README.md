@@ -29,9 +29,10 @@ npm start
 Then open http://localhost:3000
 
 - `/` — Discover: a TikTok-style vertical feed (see below)
-- `/studio.html` — set a channel, preview camera, go live, monitor chat/sales, end stream
+- `/studio.html` — set a channel, preview camera, go live, record the stream, monitor chat/sales, end stream
 - `/room.html?id=<stream id>` — watch, chat, follow, shop, checkout
-- `/dashboard.html` — stats, listings, orders, payment options, stream history
+- `/replay.html?id=<recording id>` — watch a recorded stream back (plain video player, no live chat)
+- `/dashboard.html` — stats, listings, orders, payment options, stream history, recordings
 - `/admin.html` — passcode-protected admin panel (see below)
 
 Port: `PORT` env var (default 3000).
@@ -53,8 +54,44 @@ at the bottom, with Like / Comment / Share / Follow stacked on the right edge:
 
 Above the feed is a stories-style row of live channels (tap one to jump to
 its stream). Below the feed is a Facebook-style browse section: products for
-sale ("Shop the feed"), recent activity (latest chat and purchases), and ended
-streams. Search and category filters still filter the live feed.
+sale ("Shop the feed"), recent activity (latest chat and purchases), replays
+of recorded streams, and ended streams. Search and category filters still filter the live feed.
+
+## Stream recording & replays
+
+Hosts can record a live from the Studio and viewers can watch it back later:
+
+- **How it works:** in the Studio live panel, hit **⏺ Record** while live.
+  The browser's MediaRecorder records the host's own camera and mic stream
+  (about 2.5 Mbps, WebM) and shows a red `● REC` timer. Hit **⏹ Stop
+  recording** (or End stream, which saves the recording first) and the file
+  uploads to the server as a replay. Replays appear under **Replays** on
+  Discover and in the Dashboard, and open in `/replay.html?id=…` — a plain
+  video player with play/pause/seek, no live chat, no WebRTC.
+- **Where files live:** `data/recordings/` on the server's persistent volume
+  (same volume as the SQLite database), one file per recording, with metadata
+  (channel, title, size, duration) in the `recordings` table. Served from
+  `GET /api/recordings/:id/file` with HTTP Range support so seeking works.
+- **Deleting:** the host deletes their recording from the Dashboard
+  (age-gated); the admin panel can delete any recording with the admin
+  passcode. Deleting removes the file from disk and the database row.
+  There are no accounts, so the Dashboard delete is a convention, not a
+  hard ownership check — the admin passcode is the real control.
+- **Honest limits:**
+  - It records the host's **own camera and mic only** — not the viewers,
+    not the chat, not the shop. A replay is just the host's video.
+  - The recording is held in the Studio tab until it uploads — **the host
+    must keep the tab open** while recording. Closing the tab mid-recording
+    loses it (the page warns before closing while recording).
+  - One recording is capped at **500 MB** (about 25 minutes at the default
+    bitrate); larger uploads are refused with HTTP 413. There is no
+    automatic cleanup — old replays keep using disk until someone deletes
+    them, so watch the volume. At roughly 19 MB per minute, a 1 GB volume
+    holds about 50 minutes of recordings.
+  - Recordings are stored as WebM (or MP4 where the browser records that);
+    very old browsers without MediaRecorder cannot record.
+  - Replays are 18+ gated like the rest of the site — the replay page shows
+    the age gate, and the video file itself requires the verified cookie.
 
 ## Admin panel
 
@@ -73,6 +110,9 @@ streams. Search and category filters still filter the live feed.
   live streams end immediately, and it gets a 403 if it tries to go live
   again) or unblock it. Orders carry a `status` (`placed` / `cancelled` /
   `refunded`).
+- **Recordings:** list all replays with length and size, watch any replay,
+  delete any recording (removes the file from disk too). The overview stats
+  also show a recordings count.
 
 Access is gated by a passcode, sent as the `x-admin-code` header on every
 admin request (`/api/admin/*`). Set it with the `ADMIN_CODE` environment
@@ -245,6 +285,11 @@ before relying on it being $0.
 |---|---|
 | `GET /api/streams?status=&category=&q=` / `POST /api/streams` | List / go live |
 | `GET /api/streams/:id` · `POST /api/streams/:id/end` | Stream detail / end (clears signals) |
+| `GET /api/recordings` | List replays (newest first) |
+| `POST /api/recordings?stream_id=&channel=&title=&duration=` | Upload a recording (raw video body, age-gated, max 500 MB) |
+| `GET /api/recordings/:id` | One replay's metadata |
+| `GET /api/recordings/:id/file` | Stream the recording file (age-gated, HTTP Range supported) |
+| `DELETE /api/recordings/:id` | Delete a recording, file included (age-gated) |
 | `POST /api/streams/:id/heartbeat` `{peer_id}` | Viewer join/heartbeat → viewer count |
 | `GET/POST /api/streams/:id/chat` | Live chat |
 | `GET/POST /api/products` | Listings (optional `stream_id` pin) |
@@ -265,6 +310,7 @@ before relying on it being $0.
 | `GET /api/admin/chat` · `DELETE /api/admin/chat/:id` | Admin: recent chat, delete message |
 | `GET /api/admin/products` · `DELETE /api/admin/products/:id` | Admin: listings, remove listing |
 | `GET /api/admin/orders` · `POST /api/admin/orders/:id/status` `{status}` | Admin: orders, mark placed/cancelled/refunded |
+| `GET /api/admin/recordings` · `DELETE /api/admin/recordings/:id` | Admin: list recordings, delete one (file included) |
 | `GET /api/admin/channels` · `POST /api/admin/channels/block` · `POST /api/admin/channels/unblock` | Admin: channels, block/unblock |
 
 All `/api/admin/*` routes require the `x-admin-code` header matching

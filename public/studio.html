@@ -50,11 +50,13 @@
     <video id="liveLocalVideo" autoplay muted playsinline></video>
   </div>
   <div class="row" style="margin-bottom:14px">
+    <button id="recBtn">⏺ Record</button>
     <button id="endBtn" class="secondary">End stream</button>
     <a href="/dashboard.html"><button class="ghost">Open Dashboard</button></a>
     <a id="roomLink" href="#"><button class="ghost">Open room view</button></a>
     <button class="ghost" onclick="copyRoomLink()">Copy room link</button>
   </div>
+  <div class="rec-status" id="recStatus" style="display:none"><span class="dot"></span><span>● REC</span><span class="rec-time" id="recTime">00:00</span><span class="note">Recording your camera &amp; mic on this device — keep this tab open until you stop.</span></div>
   <div class="row" style="align-items:flex-start">
     <div style="flex:2;min-width:260px">
       <h3>Live chat</h3>
@@ -228,12 +230,115 @@ async function addProduct() {
   } catch (e) { toast(e.message || 'Could not list product', 'err'); }
 }
 
+// ---- Recording (host-side, MediaRecorder on your own camera/mic) ----
+// Records only what your camera and mic capture on this device — not the
+// viewers, not the chat. Chunks are held in this tab until you stop, then
+// uploaded to the server as a replay. Close the tab mid-recording and the
+// recording is lost, so keep the tab open until you stop.
+let recorder = null, recChunks = [], recStartAt = 0, recTimer = null, recMime = 'video/webm';
+
+function pickMimeType() {
+  if (typeof MediaRecorder === 'undefined') return '';
+  for (const t of ['video/webm;codecs=vp9,opus', 'video/webm;codecs=vp8,opus', 'video/webm', 'video/mp4']) {
+    try { if (MediaRecorder.isTypeSupported(t)) return t; } catch (e) {}
+  }
+  return '';
+}
+function recElapsed() { return recStartAt ? Math.floor((Date.now() - recStartAt) / 1000) : 0; }
+function fmtClock(s) {
+  const h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60), sec = s % 60;
+  const mm = String(m).padStart(2, '0'), ss = String(sec).padStart(2, '0');
+  return h > 0 ? `${h}:${mm}:${ss}` : `${mm}:${ss}`;
+}
+function setRecUI(on) {
+  const btn = $('#recBtn');
+  btn.textContent = on ? '⏹ Stop recording' : '⏺ Record';
+  btn.classList.toggle('danger', on);
+  $('#recStatus').style.display = on ? 'flex' : 'none';
+  if (on) $('#recTime').textContent = '00:00';
+}
+
+async function startRecording() {
+  if (recorder && recorder.state !== 'inactive') return;
+  if (!localStream) { toast('Start your camera first — recording needs your camera & mic', 'warn'); return; }
+  if (typeof MediaRecorder === 'undefined') { toast('Recording is not supported in this browser', 'warn'); return; }
+  const mimeType = pickMimeType();
+  try {
+    recorder = new MediaRecorder(localStream, { mimeType: mimeType || undefined, videoBitsPerSecond: 2500000 });
+  } catch (e) {
+    try { recorder = new MediaRecorder(localStream); }
+    catch (e2) { toast('Could not start recording: ' + (e2.message || 'unsupported'), 'err'); return; }
+  }
+  recMime = recorder.mimeType || mimeType || 'video/webm';
+  recChunks = [];
+  recorder.ondataavailable = (e) => { if (e.data && e.data.size) recChunks.push(e.data); };
+  recorder.onerror = () => { toast('Recording error — the recording was stopped', 'err'); };
+  recorder.start(1000);
+  recStartAt = Date.now();
+  recTimer = setInterval(() => { $('#recTime').textContent = fmtClock(recElapsed()); }, 1000);
+  setRecUI(true);
+  toast('Recording started', 'ok');
+}
+
+// Stops the recorder and uploads the result. Resolves once the upload has
+// finished (or failed) so End stream can wait for it before navigating away.
+// Safe to call when not recording.
+function stopRecording() {
+  return new Promise((resolve) => {
+    if (!recorder || recorder.state === 'inactive') { resolve(); return; }
+    clearInterval(recTimer); recTimer = null;
+    const rec = recorder;
+    rec.onstop = async () => {
+      const chunks = recChunks; recChunks = [];
+      const duration = recElapsed(); recStartAt = 0;
+      setRecUI(false);
+      recorder = null;
+      await uploadRecording(new Blob(chunks, { type: recMime }), duration);
+      resolve();
+    };
+    try { rec.stop(); } catch (e) { resolve(); }
+  });
+}
+
+async function uploadRecording(blob, duration) {
+  if (!blob.size) { toast('Recording was empty — nothing uploaded', 'warn'); return; }
+  const btn = $('#recBtn');
+  btn.disabled = true; btn.textContent = 'Uploading recording…';
+  try {
+    const q = new URLSearchParams({
+      stream_id: String(streamId || ''),
+      channel: $('#channel').value.trim(),
+      title: $('#liveTitle').textContent || 'Untitled stream',
+      duration: String(duration),
+    });
+    const r = await fetch('/api/recordings?' + q, { method: 'POST', headers: { 'Content-Type': blob.type || 'video/webm' }, body: blob });
+    const d = await r.json().catch(() => ({}));
+    if (!r.ok) throw new Error(d.error || ('HTTP ' + r.status));
+    toast('Recording saved — watch it back under Replays', 'ok');
+  } catch (e) {
+    toast('Could not save the recording: ' + e.message, 'err');
+  } finally {
+    btn.disabled = false;
+    btn.textContent = '⏺ Record';
+  }
+}
+$('#recBtn').onclick = () => {
+  if (recorder && recorder.state !== 'inactive') stopRecording();
+  else startRecording();
+};
+// Warn before losing an in-progress recording to a closed tab.
+window.addEventListener('beforeunload', (e) => {
+  if (recorder && recorder.state !== 'inactive') e.preventDefault();
+});
+
 $('#endBtn').onclick = async () => {
   if (!streamId) return;
   if (!confirm('End this stream for everyone?')) return;
   const btn = $('#endBtn');
   btn.disabled = true;
   try {
+    // Save any in-progress recording first — the page navigates away after.
+    await stopRecording();
     await api(`/api/streams/${streamId}/end`, { method: 'POST' });
     clearInterval(pollTimer); clearInterval(chatTimer);
     Object.values(pcs).forEach(pc => pc.close()); pcs = {};

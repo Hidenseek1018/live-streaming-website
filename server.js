@@ -12,6 +12,13 @@ const { DatabaseSync } = require('node:sqlite');
 const PORT = Number(process.env.PORT || 3000);
 const HOST = process.env.HOST || '0.0.0.0';
 const DATA_DIR = process.env.DATA_DIR || path.join(__dirname, 'data');
+// Recordings live under the data dir so they survive restarts on the
+// persistent volume. One file per recording; metadata in SQLite.
+const RECORDINGS_DIR = path.join(DATA_DIR, 'recordings');
+// Hard cap on a single recording upload. 500 MB at the default 2.5 Mbps
+// recording bitrate is roughly 25 minutes of video.
+const MAX_RECORDING_BYTES = 500 * 1024 * 1024;
+fs.mkdirSync(RECORDINGS_DIR, { recursive: true });
 // Admin passcode. If unset, the whole admin API refuses access (503) —
 // there is intentionally no default passcode.
 const ADMIN_CODE = process.env.ADMIN_CODE || '';
@@ -103,6 +110,19 @@ CREATE TABLE IF NOT EXISTS age_tokens (
   created_at INTEGER NOT NULL,
   expires_at INTEGER NOT NULL
 );
+-- Recordings of live streams (host-side MediaRecorder uploads). filename is
+-- a server-generated name inside data/recordings/ — never user input.
+CREATE TABLE IF NOT EXISTS recordings (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  stream_id INTEGER,
+  channel_name TEXT NOT NULL DEFAULT '',
+  title TEXT NOT NULL DEFAULT '',
+  filename TEXT NOT NULL,
+  mime_type TEXT NOT NULL DEFAULT 'video/webm',
+  size_bytes INTEGER NOT NULL DEFAULT 0,
+  duration_seconds INTEGER,
+  created_at INTEGER NOT NULL
+);
 -- Visitor analytics (simple, first-party only — no third-party service).
 -- visitors: one row per random visitor cookie (no raw IPs stored anywhere).
 -- page_views: one row per HTML page load.
@@ -175,6 +195,48 @@ function readBody(req) {
     });
     req.on('error', reject);
   });
+}
+
+// ---- Recordings upload ----
+// Streams a raw video upload straight to disk (never buffered whole in
+// memory) and enforces the per-recording size cap. Resolves with the byte
+// count; rejects with an Error carrying .status (413 when over the cap).
+// The caller deletes the partial file on any failure.
+function saveUpload(req, destPath, limit) {
+  return new Promise((resolve, reject) => {
+    const ws = fs.createWriteStream(destPath);
+    let bytes = 0;
+    let done = false;
+    const fail = (err) => {
+      if (done) return;
+      done = true;
+      try { req.destroy(); } catch {}
+      ws.destroy();
+      fs.unlink(destPath, () => {});
+      reject(err);
+    };
+    ws.on('error', (e) => fail(e));
+    ws.on('finish', () => { if (!done) { done = true; resolve(bytes); } });
+    req.on('error', () => fail(new Error('Upload failed')));
+    req.on('data', (chunk) => {
+      bytes += chunk.length;
+      if (bytes > limit) {
+        fail(Object.assign(new Error('Recording is too large (max 500 MB).'), { status: 413 }));
+        return;
+      }
+      if (!ws.write(chunk)) req.pause();
+    });
+    ws.on('drain', () => req.resume());
+    req.on('end', () => ws.end());
+  });
+}
+function recordingPublic(r) {
+  if (!r) return null;
+  return {
+    id: r.id, stream_id: r.stream_id, channel_name: r.channel_name, title: r.title,
+    mime_type: r.mime_type, size_bytes: r.size_bytes, duration_seconds: r.duration_seconds,
+    created_at: r.created_at, url: `/api/recordings/${r.id}/file`,
+  };
 }
 const esc = (s) => String(s ?? '').trim();
 
@@ -276,6 +338,7 @@ function stripeRequest(method, path, params) {
 const TRACKED_PAGES = {
   '/': 'home', '/index.html': 'home', '/studio.html': 'studio',
   '/room.html': 'room', '/dashboard.html': 'dashboard', '/admin.html': 'admin',
+  '/replay.html': 'replay',
 };
 function trackPageView(req, res, file) {
   const label = TRACKED_PAGES[file];
@@ -372,9 +435,11 @@ const server = http.createServer(async (req, res) => {
         const cancelled = db.prepare("SELECT COUNT(*) c FROM orders WHERE status IN ('cancelled','refunded')").get().c;
         const revenue = db.prepare("SELECT COALESCE(SUM(amount),0) s FROM orders WHERE status='placed'").get().s;
         const viewers = db.prepare('SELECT COUNT(*) c FROM viewers WHERE last_seen>?').get(now() - VIEWER_TTL_MS).c;
+        const recordings = db.prepare('SELECT COUNT(*) c FROM recordings').get().c;
         return sendJson(res, 200, {
           live_streams: live, total_streams: totalStreams, channels, blocked_channels: blocked,
           products: listings, orders, cancelled_orders: cancelled, revenue: Number(revenue), viewers,
+          recordings,
           ...analyticsSummary(),
         });
       }
@@ -484,7 +549,103 @@ const server = http.createServer(async (req, res) => {
         return sendJson(res, 200, { ok: true, channel: esc(b.channel) });
       }
 
+      // Recordings: list / delete (removes the file from disk too)
+      if (p === '/api/admin/recordings' && req.method === 'GET') {
+        return sendJson(res, 200, db.prepare('SELECT * FROM recordings ORDER BY created_at DESC LIMIT 200').all().map(recordingPublic));
+      }
+      const adminDelRec = p.match(/^\/api\/admin\/recordings\/(\d+)$/);
+      if (adminDelRec && req.method === 'DELETE') {
+        const rec = db.prepare('SELECT * FROM recordings WHERE id=?').get(adminDelRec[1]);
+        if (!rec) return sendJson(res, 404, { error: 'recording not found' });
+        db.prepare('DELETE FROM recordings WHERE id=?').run(rec.id);
+        fs.unlink(path.join(RECORDINGS_DIR, rec.filename), () => {});
+        return sendJson(res, 200, { ok: true });
+      }
+
       return sendJson(res, 404, { error: 'unknown admin route' });
+    }
+
+    // ---- Recordings (replays) ----
+    // Host-side recordings: the Studio records the host's own camera/mic
+    // with MediaRecorder and uploads the file here. Files are stored under
+    // data/recordings/ with server-generated names; the filename in the DB
+    // is never taken from the request, so no path can escape the folder.
+    if (p === '/api/recordings' && req.method === 'GET') {
+      const rows = db.prepare('SELECT * FROM recordings ORDER BY created_at DESC LIMIT 200').all();
+      return sendJson(res, 200, rows.map(recordingPublic));
+    }
+    if (p === '/api/recordings' && req.method === 'POST') {
+      if (!requireAge(req, res)) return;
+      const mime = String(req.headers['content-type'] || '').split(';')[0].trim().toLowerCase();
+      if (!mime.startsWith('video/')) return sendJson(res, 400, { error: 'upload must be a video file' });
+      const len = Number(req.headers['content-length'] || 0);
+      if (len > MAX_RECORDING_BYTES) return sendJson(res, 413, { error: 'Recording is too large (max 500 MB).' });
+      const ext = mime === 'video/mp4' ? 'mp4' : 'webm';
+      const filename = `rec_${Date.now()}_${crypto.randomBytes(8).toString('hex')}.${ext}`;
+      const dest = path.join(RECORDINGS_DIR, filename);
+      let size;
+      try {
+        size = await saveUpload(req, dest, MAX_RECORDING_BYTES);
+      } catch (e) {
+        return sendJson(res, e.status || 500, { error: e.message || 'Upload failed' });
+      }
+      if (size === 0) { fs.unlink(dest, () => {}); return sendJson(res, 400, { error: 'Empty recording — nothing was uploaded.' }); }
+      const streamId = u.searchParams.get('stream_id');
+      const duration = u.searchParams.get('duration');
+      const r = db.prepare(
+        'INSERT INTO recordings (stream_id, channel_name, title, filename, mime_type, size_bytes, duration_seconds, created_at) VALUES (?,?,?,?,?,?,?,?)'
+      ).run(
+        streamId ? Number(streamId) : null,
+        esc(u.searchParams.get('channel') || '').slice(0, 120),
+        esc(u.searchParams.get('title') || '').slice(0, 200),
+        filename, mime, size,
+        duration && Number(duration) > 0 ? Math.round(Number(duration)) : null,
+        now(),
+      );
+      return sendJson(res, 201, recordingPublic(db.prepare('SELECT * FROM recordings WHERE id=?').get(r.lastInsertRowid)));
+    }
+    const recFileMatch = p.match(/^\/api\/recordings\/(\d+)\/file$/);
+    if (recFileMatch && req.method === 'GET') {
+      // Replays are 18+ like the rest of the site — the HttpOnly cookie
+      // travels with the <video> request, so verified viewers just play.
+      if (!ageVerified(req)) return sendJson(res, 403, { error: 'Age verification required — you must be 18 or older to use this feature.', code: 'age_required' });
+      const rec = db.prepare('SELECT * FROM recordings WHERE id=?').get(recFileMatch[1]);
+      if (!rec) return sendJson(res, 404, { error: 'recording not found' });
+      const fp = path.join(RECORDINGS_DIR, rec.filename);
+      if (!fp.startsWith(RECORDINGS_DIR + path.sep)) return sendJson(res, 403, { error: 'forbidden' });
+      if (!fs.existsSync(fp)) return sendJson(res, 404, { error: 'recording file is missing' });
+      const stat = fs.statSync(fp);
+      const range = req.headers.range;
+      const headers = { 'Content-Type': rec.mime_type || 'video/webm', 'Accept-Ranges': 'bytes' };
+      if (range) {
+        const m = range.match(/bytes=(\d*)-(\d*)/);
+        const start = m && m[1] ? Math.min(Number(m[1]), stat.size - 1) : 0;
+        const end = m && m[2] ? Math.min(Number(m[2]), stat.size - 1) : stat.size - 1;
+        if (start > end || start >= stat.size) {
+          res.writeHead(416, { ...headers, 'Content-Range': `bytes */${stat.size}` });
+          return res.end();
+        }
+        res.writeHead(206, { ...headers, 'Content-Range': `bytes ${start}-${end}/${stat.size}`, 'Content-Length': end - start + 1 });
+        return fs.createReadStream(fp, { start, end }).pipe(res);
+      }
+      res.writeHead(200, { ...headers, 'Content-Length': stat.size });
+      return fs.createReadStream(fp).pipe(res);
+    }
+    const recMatch = p.match(/^\/api\/recordings\/(\d+)$/);
+    if (recMatch && req.method === 'GET') {
+      const rec = db.prepare('SELECT * FROM recordings WHERE id=?').get(recMatch[1]);
+      return rec ? sendJson(res, 200, recordingPublic(rec)) : sendJson(res, 404, { error: 'recording not found' });
+    }
+    if (recMatch && req.method === 'DELETE') {
+      // Dashboard delete: age-gated. There are no accounts, so this is a
+      // convention, not a hard ownership check — the admin passcode is the
+      // real control (see /api/admin/recordings/:id). Noted in the README.
+      if (!requireAge(req, res)) return;
+      const rec = db.prepare('SELECT * FROM recordings WHERE id=?').get(recMatch[1]);
+      if (!rec) return sendJson(res, 404, { error: 'recording not found' });
+      db.prepare('DELETE FROM recordings WHERE id=?').run(rec.id);
+      fs.unlink(path.join(RECORDINGS_DIR, rec.filename), () => {});
+      return sendJson(res, 200, { ok: true });
     }
 
     // Streams
