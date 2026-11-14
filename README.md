@@ -2,8 +2,9 @@
 
 A standalone live-streaming platform: discover feed, studio (go live with your
 camera), stream rooms with live video, chat, follows and shopping, a dashboard
-with stats and payment options, and checkout. No real payment processing
-anywhere — orders only record the payment method chosen in-app.
+with stats and payment options, and checkout. Card payments run through Stripe
+Checkout when `STRIPE_SECRET_KEY` is set (test key first); without it, orders
+only record the payment method chosen in-app.
 
 ## Stack
 
@@ -248,6 +249,9 @@ before relying on it being $0.
 | `GET/POST /api/streams/:id/chat` | Live chat |
 | `GET/POST /api/products` | Listings (optional `stream_id` pin) |
 | `GET/POST /api/orders` | Buy (decrements stock, records payment method) / list |
+| `GET /api/checkout/config` | Whether card checkout (Stripe) is switched on |
+| `POST /api/checkout` `{product_id, stream_id, buyer}` | Create a Stripe Checkout Session; returns the Stripe payment URL (age-gated) |
+| `GET /api/checkout/confirm?session_id=` | Retrieve the session from Stripe; marks the order paid only when Stripe says it is paid (age-gated) |
 | `GET/POST /api/payment-methods` · `POST /api/payment-methods/:id/default` · `DELETE /api/payment-methods/:id` | Saved methods (label + last-4/handle only) |
 | `GET/POST/DELETE /api/follows` | Follow channels |
 | `POST/GET /api/signals` | WebRTC signaling (join/offer/answer/ice, addressed delivery) |
@@ -271,8 +275,43 @@ All `/api/admin/*` routes require the `x-admin-code` header matching
 
 Checkout offers Card, PayPal, Apple Pay, Google Pay, Cash App, bank transfer,
 plus any saved methods (default pre-selected). Saved methods store only a
-nickname, kind, and last-4/handle — never full numbers. **No money moves:**
-orders record the chosen method and amount in SQLite and decrement stock.
+nickname, kind, and last-4/handle — never full numbers.
+
+## Stripe Checkout (test mode first)
+
+When `STRIPE_SECRET_KEY` is set, buying a product goes through Stripe's
+hosted Checkout instead of the record-only flow:
+
+1. `POST /api/checkout` (age-gated) creates a Stripe Checkout Session for the
+   product (USD, price in cents) and creates the order as `unpaid` with the
+   session id, decrementing stock in the same transaction. The buyer is
+   redirected to Stripe's payment page.
+2. Stripe returns the buyer to the site with `?checkout=success&session_id=…`.
+   `GET /api/checkout/confirm` retrieves that session from Stripe and marks
+   the order `paid` only when Stripe reports `payment_status: 'paid'`. URL
+   params alone are never trusted.
+3. The Dashboard orders table shows Paid (Stripe) / Unpaid / Record only per
+   order, and the admin orders list shows the Stripe payment status too.
+
+- **Env var:** `STRIPE_SECRET_KEY` (set on Railway as a service variable).
+  Without it, `GET /api/checkout/config` reports `stripe_enabled: false` and
+  checkout behaves exactly as before — record-only, no charge, no breakage.
+- **Test vs live:** start with a Stripe **test** secret key (`sk_test_…`) and
+  Stripe's test cards; switch to a **live** key (`sk_live_…`) only when ready
+  for real money. Money goes to the connected Stripe account; paying sellers
+  out automatically (Stripe Connect) is a separate, later step.
+- **No webhook in v1:** payment is confirmed by the session-retrieval call
+  above. If a buyer pays but closes the tab before returning, the order stays
+  `unpaid` until someone opens the return link — a Stripe webhook endpoint
+  would close that gap and is the next improvement.
+- **Admin cancel/refund is record-only:** marking an order cancelled/refunded
+  in the admin panel changes the record only — it does not refund the buyer
+  through Stripe. Real refunds are done in the Stripe Dashboard (or a future
+  refund endpoint).
+- The server talks to Stripe with raw `node:https` calls (no Stripe SDK, zero
+  new dependencies). The secret key is never logged. `STRIPE_API_BASE` is a
+  test-only override that lets a local stub stand in for `api.stripe.com`
+  during verification — never set it in production.
 
 ## Live video — honest limits
 
