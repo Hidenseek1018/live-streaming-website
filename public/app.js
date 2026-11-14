@@ -1,3 +1,13 @@
+/* ---- Installable app (PWA) ---- */
+// Registers the service worker, which caches only the static app shell
+// (HTML/CSS/JS/icons). API calls, chat, live signalling and the age gate
+// always go to the network — the worker never caches them.
+if ('serviceWorker' in navigator) {
+  window.addEventListener('load', () => {
+    navigator.serviceWorker.register('/sw.js').catch(() => {});
+  });
+}
+
 async function api(path, opts) {
   const r = await fetch(path, { headers: { 'Content-Type': 'application/json' }, ...opts });
   const d = await r.json().catch(() => ({}));

@@ -134,6 +134,33 @@ Simple first-party traffic counts — no third-party service or script:
   is swallowed so it can never break page serving. Storage is two tables
   (`visitors`, `page_views`) in the same SQLite file, created at startup.
 
+## Installable app (PWA)
+
+The site is an installable app — no app store, no separate download:
+
+- **What it is:** a web app manifest (`public/manifest.json`) plus a
+  service worker (`public/sw.js`), registered from `public/app.js`. The
+  app is called "Live Stream", opens fullscreen (`display: standalone`),
+  and uses the site's dark theme (`#0c0e13`) for the splash screen and
+  browser chrome. Icons are in `public/icons/` (192×192, 512×512, and a
+  maskable 512×512) — a red play mark on the dark background, generated
+  locally, no external image URLs.
+- **How to install (Android):** open the site in Chrome, tap the
+  three-dot menu, then **Install app** (or **Add to Home screen**). The
+  app icon appears on the home screen and opens the site fullscreen,
+  like a native app. On desktop Chrome/Edge, use the install icon in
+  the address bar.
+- **What the service worker does:** it caches only the static app shell
+  (HTML, CSS, JS, icons) so the app opens fast and the shell still loads
+  offline. It **never** caches API responses — every `/api/*` request
+  always goes to the network, so live streams, chat, orders, visitor
+  counts and the 18+ age gate always see fresh server state, and WebRTC
+  signalling is never interrupted.
+- **Limits:** installing is per-device (each phone installs it
+  separately). The app is a shortcut to the live site — it still needs
+  an internet connection to stream, chat, or buy, and push notifications
+  are not included.
+
 ## Deploy — Fly.io (free allowance)
 
 Fly.io was picked because, unlike Render's free tier, it offers a persistent
