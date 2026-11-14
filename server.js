@@ -691,7 +691,9 @@ const server = http.createServer(async (req, res) => {
 
       // Real Stripe refund: returns the buyer's money to their original
       // card. Only for orders Stripe actually charged (payment_status
-      // 'paid' with a stored session). Full refunds only in v1.
+      // 'paid' with a stored session). Refunds are per order, for that
+      // order's own amount — so one spot from a multi-spot checkout
+      // refunds just that spot, not the whole session.
       // The refund is only recorded locally AFTER Stripe confirms it —
       // if Stripe errors, nothing changes (order stays paid, stock stays).
       const adminRefund = p.match(/^\/api\/admin\/orders\/(\d+)\/refund$/);
@@ -712,7 +714,10 @@ const server = http.createServer(async (req, res) => {
         if (!pi) return sendJson(res, 502, { error: 'Stripe has no payment for this order — nothing was refunded.' });
         let refund;
         try {
-          refund = await stripeRequest('POST', '/v1/refunds', { payment_intent: pi });
+          // Refund this order's own amount, not the whole payment — several
+          // orders can share one Checkout Session (cart), and refunding one
+          // spot must not refund the others bought with it.
+          refund = await stripeRequest('POST', '/v1/refunds', { payment_intent: pi, amount: String(Math.round(Number(o.amount) * 100)) });
         } catch (e) {
           return sendJson(res, 502, { error: 'Stripe refused the refund: ' + e.message });
         }
@@ -1163,57 +1168,73 @@ const server = http.createServer(async (req, res) => {
     if (p === '/api/checkout/config' && req.method === 'GET') {
       return sendJson(res, 200, { stripe_enabled: stripeEnabled() });
     }
+    // Cart checkout: { items: [{ product_id }] } creates ONE Stripe session
+    // for the whole cart (one order per item, all sharing the session), so a
+    // buyer can pay for several spots at once. Single-item checkout
+    // ({ product_id }) still works the same as before.
     if (p === '/api/checkout' && req.method === 'POST') {
       if (!requireAge(req, res)) return;
       const b = await readBody(req);
-      const product = db.prepare('SELECT * FROM products WHERE id=?').get(b.product_id);
-      if (!product) return sendJson(res, 404, { error: 'product not found' });
-      if (product.stock <= 0) return sendJson(res, 400, { error: 'out of stock' });
+      const rawIds = Array.isArray(b.items) && b.items.length
+        ? b.items.map((it) => Number(it && it.product_id))
+        : [Number(b.product_id)];
+      const ids = [...new Set(rawIds.filter((n) => Number.isInteger(n) && n > 0))];
+      if (!ids.length) return sendJson(res, 400, { error: 'product_id or items are required' });
+      if (ids.length > 50) return sendJson(res, 400, { error: 'at most 50 items per checkout' });
+      const products = ids.map((id) => db.prepare('SELECT * FROM products WHERE id=?').get(id));
+      if (products.some((pr) => !pr)) return sendJson(res, 404, { error: 'product not found' });
+      if (products.some((pr) => pr.stock <= 0)) return sendJson(res, 400, { error: 'one of the items is out of stock' });
       if (!stripeEnabled()) return sendJson(res, 503, { error: 'Card payments are not set up yet.', stripe_enabled: false });
-      const streamId = b.stream_id ? Number(b.stream_id) : product.stream_id;
+      const streamId = b.stream_id ? Number(b.stream_id) : products[0].stream_id;
       const proto = req.headers['x-forwarded-proto'] || 'http';
       const host = req.headers.host || `localhost:${PORT}`;
       const base = `${proto}://${host}`;
       const returnBase = streamId ? `/room.html?id=${streamId}` : '/dashboard.html';
       const sep = streamId ? '&' : '?';
+      const lineParams = {
+        mode: 'payment',
+        success_url: `${base}${returnBase}${sep}checkout=success&session_id={CHECKOUT_SESSION_ID}`,
+        cancel_url: `${base}${returnBase}${sep}checkout=cancelled`,
+      };
+      products.forEach((pr, i) => {
+        lineParams[`line_items[${i}][price_data][currency]`] = 'usd';
+        lineParams[`line_items[${i}][price_data][product_data][name]`] = pr.name;
+        lineParams[`line_items[${i}][price_data][unit_amount]`] = String(Math.round(Number(pr.price) * 100));
+        lineParams[`line_items[${i}][quantity]`] = '1';
+      });
       let session;
       try {
-        session = await stripeRequest('POST', '/v1/checkout/sessions', {
-          mode: 'payment',
-          'line_items[0][price_data][currency]': 'usd',
-          'line_items[0][price_data][product_data][name]': product.name,
-          'line_items[0][price_data][unit_amount]': String(Math.round(Number(product.price) * 100)),
-          'line_items[0][quantity]': '1',
-          success_url: `${base}${returnBase}${sep}checkout=success&session_id={CHECKOUT_SESSION_ID}`,
-          cancel_url: `${base}${returnBase}${sep}checkout=cancelled`,
-        });
+        session = await stripeRequest('POST', '/v1/checkout/sessions', lineParams);
       } catch (e) {
         return sendJson(res, 502, { error: 'Could not start secure checkout: ' + e.message });
       }
       if (!session || !session.id || !session.url) return sendJson(res, 502, { error: 'Could not start secure checkout.' });
       db.exec('BEGIN IMMEDIATE');
-      let order;
+      const orders = [];
       try {
-        const upd = db.prepare('UPDATE products SET stock = stock - 1 WHERE id=? AND stock > 0').run(product.id);
-        if (upd.changes === 0) { db.exec('ROLLBACK'); return sendJson(res, 400, { error: 'out of stock' }); }
-        const r = db.prepare('INSERT INTO orders (product_id, stream_id, buyer, payment_method, amount, stripe_session_id, payment_status, created_at) VALUES (?,?,?,?,?,?,?,?)')
-          .run(product.id, streamId || null, esc(b.buyer) || 'Anonymous', 'Stripe', product.price, session.id, 'unpaid', now());
-        order = db.prepare('SELECT * FROM orders WHERE id=?').get(r.lastInsertRowid);
-        // Link a break spot to its order while the checkout is open, so an
-        // abandoned checkout can still be freed (cancel/refund) later — the
-        // spot only becomes 'sold' once payment confirms.
-        db.prepare("UPDATE break_spots SET order_id=? WHERE product_id=? AND status='available'").run(order.id, product.id);
+        for (const pr of products) {
+          const upd = db.prepare('UPDATE products SET stock = stock - 1 WHERE id=? AND stock > 0').run(pr.id);
+          if (upd.changes === 0) { db.exec('ROLLBACK'); return sendJson(res, 400, { error: 'one of the items is out of stock' }); }
+          const r = db.prepare('INSERT INTO orders (product_id, stream_id, buyer, payment_method, amount, stripe_session_id, payment_status, created_at) VALUES (?,?,?,?,?,?,?,?)')
+            .run(pr.id, streamId || null, esc(b.buyer) || 'Anonymous', 'Stripe', pr.price, session.id, 'unpaid', now());
+          const order = db.prepare('SELECT * FROM orders WHERE id=?').get(r.lastInsertRowid);
+          orders.push(order);
+          // Link a break spot to its order while the checkout is open, so an
+          // abandoned checkout can still be freed (cancel/refund) later — the
+          // spot only becomes 'sold' once payment confirms.
+          db.prepare("UPDATE break_spots SET order_id=? WHERE product_id=? AND status='available'").run(order.id, pr.id);
+        }
         db.exec('COMMIT');
       } catch (e) { db.exec('ROLLBACK'); throw e; }
-      return sendJson(res, 201, { url: session.url, session_id: session.id, order_id: order.id });
+      return sendJson(res, 201, { url: session.url, session_id: session.id, order_id: orders[0].id, order_ids: orders.map((o) => o.id) });
     }
     if (p === '/api/checkout/confirm' && req.method === 'GET') {
       if (!requireAge(req, res)) return;
       const sessionId = u.searchParams.get('session_id') || '';
       if (!sessionId) return sendJson(res, 400, { error: 'session_id is required' });
       if (!stripeEnabled()) return sendJson(res, 503, { error: 'Card payments are not set up yet.', stripe_enabled: false });
-      const order = db.prepare('SELECT * FROM orders WHERE stripe_session_id=?').get(sessionId);
-      if (!order) return sendJson(res, 404, { error: 'order not found for this checkout session' });
+      const orders = db.prepare('SELECT * FROM orders WHERE stripe_session_id=? ORDER BY id ASC').all(sessionId);
+      if (!orders.length) return sendJson(res, 404, { error: 'order not found for this checkout session' });
       let session;
       try {
         session = await stripeRequest('GET', '/v1/checkout/sessions/' + encodeURIComponent(sessionId));
@@ -1221,16 +1242,20 @@ const server = http.createServer(async (req, res) => {
         return sendJson(res, 502, { error: 'Could not verify payment with Stripe: ' + e.message });
       }
       const paid = session && session.payment_status === 'paid';
-      if (paid && order.payment_status !== 'paid') {
-        db.prepare("UPDATE orders SET payment_status='paid' WHERE id=?").run(order.id);
-        // The spot only becomes sold once Stripe confirms the payment —
-        // an unpaid session must not claim it (stock was already taken
-        // when the session was created, so a held spot shows as "Held").
-        db.prepare("UPDATE break_spots SET status='sold', buyer=?, order_id=? WHERE product_id=? AND status='available'")
-          .run(order.buyer, order.id, order.product_id);
+      if (paid) {
+        for (const order of orders) {
+          if (order.payment_status !== 'paid') {
+            db.prepare("UPDATE orders SET payment_status='paid' WHERE id=?").run(order.id);
+            // Each spot only becomes sold once Stripe confirms the payment —
+            // an unpaid session must not claim it (stock was already taken
+            // when the session was created, so a held spot shows as "Held").
+            db.prepare("UPDATE break_spots SET status='sold', buyer=?, order_id=? WHERE product_id=? AND status='available'")
+              .run(order.buyer, order.id, order.product_id);
+          }
+        }
       }
-      const updated = db.prepare('SELECT * FROM orders WHERE id=?').get(order.id);
-      return sendJson(res, 200, { paid, payment_status: session.payment_status || 'unknown', order: updated });
+      const updated = db.prepare('SELECT * FROM orders WHERE stripe_session_id=? ORDER BY id ASC').all(sessionId);
+      return sendJson(res, 200, { paid, payment_status: session.payment_status || 'unknown', order: updated[0], orders: updated, order_ids: updated.map((o) => o.id) });
     }
 
     // Buyer problem reports (disputes): a buyer flags something wrong

@@ -59,6 +59,32 @@ const myId = viewerId();
 let stream = null, pc = null, signalSince = 0, joinedAt = Date.now(), gotVideo = false, pollTimer, chatTimer, hbTimer, breakTimer;
 let selectedProduct = null, selectedMethod = null, stripeEnabled = false;
 let currentBreak = null; // full break detail (spots + pulls) when this room is a break
+let cartMode = false; // the checkout modal is paying for the whole cart
+// ---- Cart: break spots (one tap adds a spot; checkout pays for all of
+// them in one Stripe session). Kept in sessionStorage so a refresh or the
+// 5s break reload never loses it. Adding to the cart holds nothing —
+// stock is only taken when checkout starts, as with a single spot.
+const CART_KEY = 'liveCart';
+function getCart() { try { return JSON.parse(sessionStorage.getItem(CART_KEY) || '[]'); } catch { return []; } }
+function saveCart(c) { sessionStorage.setItem(CART_KEY, JSON.stringify(c)); }
+function cartTotal(c) { return (c || getCart()).reduce((t, it) => t + Number(it.price || 0), 0); }
+function toggleCart(productId) {
+  const p = (window._products || []).find((x) => x.id === productId);
+  if (!p) return;
+  let c = getCart();
+  if (c.some((it) => it.id === productId)) c = c.filter((it) => it.id !== productId);
+  else c = [...c, { id: p.id, name: p.name, price: Number(p.price) }];
+  saveCart(c);
+  renderBreak();
+}
+function removeFromCart(productId) { saveCart(getCart().filter((it) => it.id !== productId)); renderBreak(); }
+function clearCart() { saveCart([]); renderBreak(); }
+// Drop cart items that are no longer buyable (sold, or held by someone else).
+function pruneCart() {
+  if (!currentBreak) return;
+  const ok = new Set(currentBreak.spots.filter((s) => s.status === 'available' && (s.stock ?? 1) > 0).map((s) => s.product_id));
+  saveCart(getCart().filter((it) => ok.has(it.id)));
+}
 
 // ---- Break view: banner, spots grid, pulls (read-only — pulls are
 // entered by the host in the Studio). Refreshes every 5s while open.
@@ -82,11 +108,20 @@ function renderBreak() {
   const statusBadge = br.status === 'live' ? '<span class="live-badge">● LIVE BREAK</span>'
     : br.status === 'upcoming' ? '<span class="upcoming-badge">📅 UPCOMING BREAK</span>'
     : '<span class="ended-badge">🏆 BREAK ENDED</span>';
+  const cart = getCart();
   const spots = br.spots.map(s => {
     if (s.status === 'sold') return `<button class="spot sold" disabled><b>✓ ${esc(s.label)}</b><span>${esc(s.buyer)}</span></button>`;
     if ((s.stock ?? 1) <= 0) return `<button class="spot held" disabled><b>⏳ ${esc(s.label)}</b><span>Held — checkout in progress</span></button>`;
-    return `<button class="spot available" onclick="openCheckout(${s.product_id})"><b>🎲 ${esc(s.label)}</b><span>$${Number(br.spot_price).toFixed(2)} · Buy spot</span></button>`;
+    const added = cart.some((it) => it.id === s.product_id);
+    return `<button class="spot available${added ? ' in-cart' : ''}" onclick="toggleCart(${s.product_id})"><b>${added ? '✓ ' : '🎲 '}${esc(s.label)}</b><span>$${Number(br.spot_price).toFixed(2)} · ${added ? 'In cart — tap to remove' : 'Add to cart'}</span></button>`;
   }).join('');
+  const cartHtml = cart.length ? `
+  <div class="card" id="cartCard"><h2>🛒 Your cart (${cart.length})</h2>
+    ${cart.map((it) => `<div class="row" style="justify-content:space-between;border-bottom:1px solid #2a2f3a;padding:8px 0"><span><b>${esc(it.name)}</b><br>$${Number(it.price).toFixed(2)}</span><button class="small secondary" onclick="removeFromCart(${it.id})">Remove</button></div>`).join('')}
+    <p style="margin:10px 0"><b>Total: $${cartTotal(cart).toFixed(2)}</b></p>
+    <div class="row"><button onclick="openCartCheckout()">Checkout (${cart.length} item${cart.length > 1 ? 's' : ''})</button><button class="secondary" onclick="clearCart()">Clear cart</button></div>
+    <p class="note">One payment for everything in the cart — spots are held only once checkout starts.</p>
+  </div>` : '';
   const pulls = br.pulls.length ? br.pulls.map(p => `<div class="pull-card"><div class="pull-item">🎉 ${esc(p.item)}</div><div class="pull-spot">→ ${esc(p.spot_label || 'a spot')}</div><div class="pull-time">${new Date(p.created_at).toLocaleString()}</div></div>`).join('')
     : '<p class="note">No pulls yet — the host records each pull here as it happens on camera.</p>';
   sec.innerHTML = `
@@ -100,8 +135,9 @@ function renderBreak() {
   </div>
   <div class="card"><h2>🎲 Spots</h2>
     <div class="spot-grid">${spots}</div>
-    <p class="note">Tap an available spot to buy it. Sold spots show who bought them.</p>
+    <p class="note">Tap an available spot to add it to your cart, then check out once for all of them. Sold spots show who bought them.</p>
   </div>
+  ${cartHtml}
   <div class="card"><h2>🎉 Pulls</h2>${pulls}</div>`;
   // Spot products must be known to the checkout modal even though they are
   // hidden from the generic shop list below.
@@ -239,38 +275,65 @@ async function addProduct() {
   $('#pName').value = ''; $('#pPrice').value = ''; $('#pStock').value = ''; loadChatProducts(); toast('Product listed', 'ok');
 }
 
+function setupStripeCopy(noteText) {
+  const wrap = $('#payChoicesWrap');
+  if (wrap) wrap.style.display = 'none';
+  const note = $('#checkoutNote');
+  if (note) note.textContent = noteText;
+  const ack = $('#termsAckLabel');
+  if (ack) ack.innerHTML = `<input type="checkbox" id="ackTerms"> I agree to the <a href="/terms.html" target="_blank">Terms of Service</a> and <a href="/sales-policy.html" target="_blank">Seller &amp; Sales Policy</a>.`;
+  $('#confirmBuy').textContent = 'Continue to secure payment';
+}
+async function setupRecordOnlyPay() {
+  const wrap = $('#payChoicesWrap');
+  if (wrap) wrap.style.display = '';
+  const note = $('#checkoutNote');
+  if (note) note.textContent = 'No real charging — this only records which payment method you chose. Saved methods are managed in the Dashboard.';
+  $('#confirmBuy').textContent = 'Buy now';
+  const saved = await api('/api/payment-methods');
+  const def = saved.find(m => m.is_default) || saved[0];
+  selectedMethod = def ? `${def.label} (${def.kind}${def.last4_or_handle ? ' •• ' + def.last4_or_handle : ''})` : ONE_TIME_METHODS[0];
+  $('#payChoices').innerHTML =
+    saved.map(m => `<label style="display:block;margin:4px 0"><input type="radio" name="pay" style="width:auto" value="${esc(m.label)} (${esc(m.kind)}${m.last4_or_handle ? ' •• ' + esc(m.last4_or_handle) : ''})" ${m === def ? 'checked' : ''}> ${esc(m.label)} — ${esc(m.kind)}${m.last4_or_handle ? ' •• ' + esc(m.last4_or_handle) : ''}${m.is_default ? ' (default)' : ''}</label>`).join('') +
+    ONE_TIME_METHODS.map(m => `<label style="display:block;margin:4px 0"><input type="radio" name="pay" style="width:auto" value="${m}" ${!def && m === ONE_TIME_METHODS[0] ? 'checked' : ''}> ${m} (one-time)</label>`).join('');
+  document.querySelectorAll('input[name=pay]').forEach(r => r.addEventListener('change', () => selectedMethod = r.value));
+}
 async function openCheckout(productId) {
+  cartMode = false;
   selectedProduct = window._products.find(p => p.id === productId);
   if (!selectedProduct) return;
   $('#checkoutItem').textContent = `${selectedProduct.name} — $${Number(selectedProduct.price).toFixed(2)}`;
   $('#buyMsg').textContent = '';
   $('#ackTerms').checked = false;
-  const wrap = $('#payChoicesWrap');
   if (stripeEnabled) {
     // Card payment goes through Stripe's hosted checkout — no payment
     // method is picked here, Stripe collects it on its own page.
-    if (wrap) wrap.style.display = 'none';
-    const note = $('#checkoutNote');
-    if (note) note.textContent = 'Secure checkout with Stripe — you will be redirected to Stripe to pay by card. No payment details are stored on this site.';
-    const ack = $('#termsAckLabel');
-    if (ack) ack.innerHTML = `<input type="checkbox" id="ackTerms"> I agree to the <a href="/terms.html" target="_blank">Terms of Service</a> and <a href="/sales-policy.html" target="_blank">Seller &amp; Sales Policy</a>.`;
-    $('#confirmBuy').textContent = 'Continue to secure payment';
+    setupStripeCopy('Secure checkout with Stripe — you will be redirected to Stripe to pay by card. No payment details are stored on this site.');
   } else {
-    if (wrap) wrap.style.display = '';
-    const note = $('#checkoutNote');
-    if (note) note.textContent = 'No real charging — this only records which payment method you chose. Saved methods are managed in the Dashboard.';
-    $('#confirmBuy').textContent = 'Buy now';
-    const saved = await api('/api/payment-methods');
-    const def = saved.find(m => m.is_default) || saved[0];
-    selectedMethod = def ? `${def.label} (${def.kind}${def.last4_or_handle ? ' •• ' + def.last4_or_handle : ''})` : ONE_TIME_METHODS[0];
-    $('#payChoices').innerHTML =
-      saved.map(m => `<label style="display:block;margin:4px 0"><input type="radio" name="pay" style="width:auto" value="${esc(m.label)} (${esc(m.kind)}${m.last4_or_handle ? ' •• ' + esc(m.last4_or_handle) : ''})" ${m === def ? 'checked' : ''}> ${esc(m.label)} — ${esc(m.kind)}${m.last4_or_handle ? ' •• ' + esc(m.last4_or_handle) : ''}${m.is_default ? ' (default)' : ''}</label>`).join('') +
-      ONE_TIME_METHODS.map(m => `<label style="display:block;margin:4px 0"><input type="radio" name="pay" style="width:auto" value="${m}" ${!def && m === ONE_TIME_METHODS[0] ? 'checked' : ''}> ${m} (one-time)</label>`).join('');
-    document.querySelectorAll('input[name=pay]').forEach(r => r.addEventListener('change', () => selectedMethod = r.value));
+    await setupRecordOnlyPay();
   }
   $('#checkoutModal').style.display = 'flex';
 }
-function closeCheckout() { $('#checkoutModal').style.display = 'none'; }
+// Cart checkout: the same modal, but it pays for everything in the cart
+// in one Stripe session (or one record-only order per item when Stripe
+// is off) instead of a single spot.
+async function openCartCheckout() {
+  const cart = getCart();
+  if (!cart.length) return;
+  cartMode = true;
+  selectedProduct = null;
+  $('#checkoutItem').innerHTML = cart.map((it) => `<div>${esc(it.name)} — $${Number(it.price).toFixed(2)}</div>`).join('')
+    + `<p style="margin:8px 0 0"><b>Total: $${cartTotal(cart).toFixed(2)}</b> (${cart.length} item${cart.length > 1 ? 's' : ''})</p>`;
+  $('#buyMsg').textContent = '';
+  $('#ackTerms').checked = false;
+  if (stripeEnabled) {
+    setupStripeCopy('Secure checkout with Stripe — you will be redirected to Stripe to pay by card for everything in the cart. No payment details are stored on this site.');
+  } else {
+    await setupRecordOnlyPay();
+  }
+  $('#checkoutModal').style.display = 'flex';
+}
+function closeCheckout() { $('#checkoutModal').style.display = 'none'; cartMode = false; }
 
 // ---- Reports: flag a listing, or a problem with an order ----
 // Listing reports go to the admin panel (counts per listing/channel).
@@ -306,9 +369,11 @@ async function submitDispute() {
 $('#confirmBuy').onclick = async () => {
   if (!$('#ackTerms').checked) { $('#buyMsg').textContent = 'Please tick the acknowledgment box first.'; return; }
   const buyer = $('#buyerName').value.trim() || displayName();
+  const items = cartMode ? getCart().map((it) => ({ product_id: it.id })) : [{ product_id: selectedProduct.id }];
+  if (!items.length) { $('#buyMsg').textContent = 'Your cart is empty.'; return; }
   if (stripeEnabled) {
     try {
-      const c = await api('/api/checkout', { method: 'POST', body: JSON.stringify({ product_id: selectedProduct.id, stream_id: streamId, buyer }) });
+      const c = await api('/api/checkout', { method: 'POST', body: JSON.stringify({ items, stream_id: streamId, buyer }) });
       if (c && c.url) { location.href = c.url; return; }
       throw new Error('Secure checkout did not return a payment page.');
     } catch (e) {
@@ -316,14 +381,29 @@ $('#confirmBuy').onclick = async () => {
         // Stripe was on when the page loaded but is off now — fall through
         // to the record-only flow below instead of failing the purchase.
         stripeEnabled = false;
-      } else { $('#buyMsg').textContent = 'Could not start secure checkout: ' + e.message; toast(e.message || 'Checkout failed', 'err'); return; }
+      } else {
+        $('#buyMsg').textContent = 'Could not start secure checkout: ' + e.message;
+        toast(e.message || 'Checkout failed', 'err');
+        if (cartMode) { pruneCart(); renderBreak(); }
+        return;
+      }
     }
   }
+  // Record-only (Stripe off): one order per item, spots sell as each lands.
   try {
-    const order = await api('/api/orders', { method: 'POST', body: JSON.stringify({ product_id: selectedProduct.id, stream_id: streamId, buyer, payment_method: selectedMethod }) });
-    $('#buyMsg').innerHTML = `<span class="ok">Order #${order.id} recorded — paid with ${esc(order.payment_method)}. ${order.remaining_stock} left in stock. No real charge was made.</span>`;
-    loadChatProducts(); toast('Order recorded (no real charge)', 'ok');
-  } catch (e) { $('#buyMsg').textContent = 'Could not complete purchase: ' + e.message; toast(e.message || 'Purchase failed', 'err'); }
+    const made = [];
+    for (const it of items) {
+      const order = await api('/api/orders', { method: 'POST', body: JSON.stringify({ product_id: it.product_id, stream_id: streamId, buyer, payment_method: selectedMethod }) });
+      made.push(order);
+    }
+    if (cartMode) clearCart();
+    $('#buyMsg').innerHTML = `<span class="ok">${made.length > 1 ? `Orders #${made.map((o) => o.id).join(', #')} recorded` : `Order #${made[0].id} recorded`} — paid with ${esc(made[0].payment_method)}. No real charge was made.</span>`;
+    loadChatProducts(); loadBreak(); toast('Order recorded (no real charge)', 'ok');
+  } catch (e) {
+    $('#buyMsg').textContent = 'Could not complete purchase: ' + e.message;
+    toast(e.message || 'Purchase failed', 'err');
+    if (cartMode) { pruneCart(); renderBreak(); }
+  }
 };
 init();
 </script></body></html>

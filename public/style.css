@@ -502,6 +502,8 @@ td{overflow-wrap:break-word}
 .spot.available{border-color:rgba(251,191,36,.55);cursor:pointer}
 .spot.available:hover{border-color:#fbbf24;background:rgba(245,158,11,.08);filter:none;transform:translateY(-1px)}
 .spot.available span{color:#fbbf24}
+.spot.available.in-cart{border-color:#4ade80;background:rgba(74,222,128,.1)}
+.spot.available.in-cart span{color:#4ade80}
 .spot.sold{opacity:.55;cursor:default}
 .spot.sold span{color:#4ade80}
 .spot.held{opacity:.7;cursor:default;border-style:dashed}

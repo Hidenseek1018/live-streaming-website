@@ -199,8 +199,12 @@ checkAgeGate();
   if (q.get('checkout') === 'success' && q.get('session_id')) {
     api('/api/checkout/confirm?session_id=' + encodeURIComponent(q.get('session_id')))
       .then((c) => {
-        if (c.paid) toast('Payment confirmed — order #' + c.order.id + ' paid', 'ok');
-        else toast('Payment not confirmed yet (' + (c.payment_status || 'unpaid') + ')', 'warn');
+        if (c.paid) {
+          // A cart checkout is done — the items are bought, drop the cart.
+          try { sessionStorage.removeItem('liveCart'); } catch {}
+          const n = (c.orders && c.orders.length) || 1;
+          toast(n > 1 ? `Payment confirmed — ${n} orders paid` : 'Payment confirmed — order #' + c.order.id + ' paid', 'ok');
+        } else toast('Payment not confirmed yet (' + (c.payment_status || 'unpaid') + ')', 'warn');
       })
       .catch((e) => toast(e.message || 'Could not confirm payment', 'err'));
   } else if (q.get('checkout') === 'cancelled') {
