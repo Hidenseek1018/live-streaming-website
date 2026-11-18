@@ -553,7 +553,7 @@ function analyticsSummary() {
   return { total_visits: total, unique_visitors: uniques, visits_today: visitsToday, per_page: perPage, per_day: perDay };
 }
 
-const MIME = { '.html': 'text/html', '.css': 'text/css', '.js': 'text/javascript', '.json': 'application/json', '.png': 'image/png', '.jpg': 'image/jpeg', '.svg': 'image/svg+xml' };
+const MIME = { '.html': 'text/html', '.css': 'text/css', '.js': 'text/javascript', '.json': 'application/json', '.png': 'image/png', '.jpg': 'image/jpeg', '.svg': 'image/svg+xml', '.webp': 'image/webp' };
 
 const server = http.createServer(async (req, res) => {
   try {
